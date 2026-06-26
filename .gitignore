@@ -3,7 +3,7 @@ bin/
 obj/
 **/bin/
 **/obj/
-.venv/
+
 wwwroot/uploads/
 wwwroot/reports/
 
