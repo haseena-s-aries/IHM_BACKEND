@@ -1,0 +1,282 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="report.css">
+</head>
+<body>
+
+    <section class="cover">
+        <h1>Inventory of Hazardous Materials</h1>
+        <h2>Part I</h2>
+
+        <table>
+            <tr>
+                <td class="label">Report No.</td>
+                <td>{{ report.reportNo or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">UID</td>
+                <td>{{ report.uid or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Revision</td>
+                <td>{{ report.revisionNo or '0' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Vessel Name</td>
+                <td>{{ job.vesselName or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">IMO No.</td>
+                <td>{{ job.imoNumber or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Client</td>
+                <td>{{ job.clientName or '-' }}</td>
+            </tr>
+        </table>
+    </section>
+
+    <section class="section">
+        <h2>Document Revision Record</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Revision</th>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Prepared By</th>
+                    <th>Checked By</th>
+                    <th>Approved By</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>{{ report.revisionNo or '0' }}</td>
+                    <td>{{ report.revisionDate or '-' }}</td>
+                    <td>Issued for review / approval</td>
+                    <td>{{ report.preparedBy or '-' }}</td>
+                    <td>{{ report.checkedBy or '-' }}</td>
+                    <td>{{ report.approvedBy or '-' }}</td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section class="section">
+        <h2>Table of Contents</h2>
+        <table>
+            <tr><td>1</td><td>Introduction</td></tr>
+            <tr><td>2</td><td>Vessel Particulars</td></tr>
+            <tr><td>3</td><td>Survey / Report Information</td></tr>
+            <tr><td>4</td><td>Scope and Methodology</td></tr>
+            <tr><td>5</td><td>Audit Summary</td></tr>
+            <tr><td>6</td><td>Inventory of Hazardous Materials Part I</td></tr>
+            <tr><td>7</td><td>PCHM / Sampling Summary</td></tr>
+            <tr><td>8</td><td>Appendices</td></tr>
+        </table>
+    </section>
+
+    <section class="section">
+        <h2>1. Introduction</h2>
+        <p>
+            This report presents the Inventory of Hazardous Materials Part I prepared
+            based on available documents, visual inspection, sampling and applicable
+            survey records.
+        </p>
+
+        <h2>2. Vessel Particulars</h2>
+        <table>
+            <tr>
+                <td class="label">Vessel Name</td>
+                <td>{{ vessel.vesselName or job.vesselName or '-' }}</td>
+                <td class="label">IMO No.</td>
+                <td>{{ vessel.imoNumber or job.imoNumber or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Official No.</td>
+                <td>{{ vessel.officialNumber or '-' }}</td>
+                <td class="label">Call Sign</td>
+                <td>{{ vessel.callSign or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Flag</td>
+                <td>{{ vessel.flag or '-' }}</td>
+                <td class="label">Port of Registry</td>
+                <td>{{ vessel.portOfRegistry or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Class Society</td>
+                <td>{{ vessel.classSociety or '-' }}</td>
+                <td class="label">Vessel Type</td>
+                <td>{{ vessel.vesselType or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Gross Tonnage</td>
+                <td>{{ vessel.grossTonnage or '-' }}</td>
+                <td class="label">Net Tonnage</td>
+                <td>{{ vessel.netTonnage or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Owner</td>
+                <td>{{ vessel.ownerName or '-' }}</td>
+                <td class="label">Manager</td>
+                <td>{{ vessel.managerName or '-' }}</td>
+            </tr>
+        </table>
+    </section>
+
+    <section class="section">
+        <h2>3. Survey / Report Information</h2>
+        <table>
+            <tr>
+                <td class="label">Project Name</td>
+                <td>{{ job.projectName or '-' }}</td>
+                <td class="label">Client</td>
+                <td>{{ job.clientName or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Survey Date</td>
+                <td>{{ report.surveyDate or '-' }}</td>
+                <td class="label">Site of Check</td>
+                <td>{{ report.siteOfCheck or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Audit Port</td>
+                <td>{{ job.auditPort or '-' }}</td>
+                <td class="label">Audit Address</td>
+                <td>{{ job.auditAddress or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Hazmat Expert</td>
+                <td>{{ report.hazmatExpertName or '-' }}</td>
+                <td class="label">Ship Manager</td>
+                <td>{{ report.shipManager or '-' }}</td>
+            </tr>
+            <tr>
+                <td class="label">Laboratory</td>
+                <td>{{ report.laboratoryName or '-' }}</td>
+                <td class="label">Lab Report No.</td>
+                <td>{{ report.labReportNo or '-' }}</td>
+            </tr>
+        </table>
+
+        <h2>4. Scope and Methodology</h2>
+        <h3>Sampling Methodology</h3>
+        <p>{{ report.samplingMethodology or '-' }}</p>
+
+        <h3>Chemical Analysis Method</h3>
+        <p>{{ report.chemicalAnalysisMethod or '-' }}</p>
+    </section>
+
+    <section class="section">
+        <h2>5. Audit Summary</h2>
+        <table>
+            <tr><th>Description</th><th>Count</th></tr>
+            <tr><td>Total Checkpoints</td><td>{{ summary.total }}</td></tr>
+            <tr><td>Visual Checks</td><td>{{ summary.visual }}</td></tr>
+            <tr><td>Sampling Checks</td><td>{{ summary.sample }}</td></tr>
+            <tr><td>Pending</td><td>{{ summary.pending }}</td></tr>
+            <tr><td>PCHM Marked</td><td>{{ summary.pchm }}</td></tr>
+            <tr><td>Layout Markers</td><td>{{ markers|length }}</td></tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>6. Inventory of Hazardous Materials Part I</h2>
+
+        {% for area in areas %}
+        <div class="area-title">{{ area.areaName or '-' }}</div>
+        <table class="inventory-table">
+            <thead>
+                <tr>
+                    <th>No.</th>
+                    <th>Table</th>
+                    <th>Hazardous Material</th>
+                    <th>Location</th>
+                    <th>Equipment</th>
+                    <th>Component</th>
+                    <th>Procedure</th>
+                    <th>Result</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for cp in area.checkpoints %}
+                <tr>
+                    <td>{{ cp.sampleNo or cp.sample_No or '-' }}</td>
+                    <td>{{ cp.tableAB or cp.table_A_B or '-' }}</td>
+                    <td>{{ cp.hazardousMaterial or '-' }}</td>
+                    <td>{{ cp.location or '-' }}</td>
+                    <td>{{ cp.equipmentName or '-' }}</td>
+                    <td>{{ cp.component or '-' }}</td>
+                    <td>
+                        {% if cp.samplingCheck == 'S' %}S{% elif cp.visualCheck == 'V' %}V{% else %}-{% endif %}
+                    </td>
+                    <td>{{ cp.result or '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endfor %}
+    </section>
+
+    <section class="section">
+        <h2>7. PCHM / Sampling Summary</h2>
+        <table>
+            <tr>
+                <th>Checkpoint</th>
+                <th>Area</th>
+                <th>Location</th>
+                <th>Hazmat</th>
+                <th>Remarks</th>
+            </tr>
+
+            {% for item in pchm_items %}
+            <tr>
+                <td>{{ item.checkpoint.sampleNo or item.checkpoint.sample_No or '-' }}</td>
+                <td>{{ item.area.areaName or '-' }}</td>
+                <td>{{ item.checkpoint.location or '-' }}</td>
+                <td>{{ item.checkpoint.hazardousMaterial or '-' }}</td>
+                <td>{{ item.checkpoint.remarks or '-' }}</td>
+            </tr>
+            {% endfor %}
+
+            {% if pchm_items|length == 0 %}
+            <tr><td colspan="5" class="center">No PCHM items marked.</td></tr>
+            {% endif %}
+        </table>
+    </section>
+
+    <section>
+        <h2>8. Appendices</h2>
+        <h3>Appendix A - Layout / Marker Summary</h3>
+
+        {% if layout_image %}
+        <img class="layout-img" src="{{ layout_image }}">
+        {% else %}
+        <p class="placeholder">No layout image available.</p>
+        {% endif %}
+
+        <table>
+            <tr>
+                <th>Marker</th>
+                <th>Checkpoint Id</th>
+                <th>X %</th>
+                <th>Y %</th>
+                <th>Notes</th>
+            </tr>
+            {% for marker in markers %}
+            <tr>
+                <td>{{ marker.markerLabel or '-' }}</td>
+                <td>{{ marker.ihmCheckpointId or '-' }}</td>
+                <td>{{ marker.xPercent or '-' }}</td>
+                <td>{{ marker.yPercent or '-' }}</td>
+                <td>{{ marker.notes or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </section>
+
+</body>
+</html>
