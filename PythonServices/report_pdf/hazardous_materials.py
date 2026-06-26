@@ -1,6 +1,10 @@
 from io import BytesIO
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
 
 from pypdf import PdfReader
+from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.pdfbase import pdfmetrics
@@ -24,6 +28,410 @@ FIRST_PAGE_CONTENT_TOP_OFFSET = 125
 NEXT_PAGE_CONTENT_TOP_OFFSET = 85
 SECTION_LABEL_GAP = 14
 SECTION_BOTTOM_GAP = 25
+
+HAZARD_LAYOUT_PAGE_WIDTH = 840
+HAZARD_LAYOUT_PAGE_HEIGHT = 580
+
+
+def normalize_web_path(value):
+    value = str(value or "").strip().replace("\\", "/")
+    if not value:
+        return ""
+
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc:
+        value = parsed.path
+
+    return "/" + value.lstrip("/")
+
+
+def resolve_report_image_path(web_path):
+    value = str(web_path or "").strip()
+    if not value:
+        return None
+
+    path = Path(value)
+    if path.exists():
+        return path
+
+    if len(value) > 2 and value[1] == ":":
+        return path
+
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc:
+        value = parsed.path
+
+    path = Path(value)
+    if path.exists():
+        return path
+
+    python_services_dir = Path(__file__).resolve().parents[1]
+    project_dir = python_services_dir.parent
+
+    candidates = [
+        project_dir / "wwwroot" / value.lstrip("/\\"),
+        Path.cwd() / "wwwroot" / value.lstrip("/\\"),
+        Path.cwd() / value.lstrip("/\\"),
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return candidates[0]
+
+
+def first_value(row, *keys):
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def equipment_sample_no(row):
+    return first_value(
+        row,
+        "sample_No",
+        "Sample_No",        
+    )
+
+
+def equipment_name(row):
+    return first_value(
+        row,
+        "equipmentName",
+        "EquipmentName",
+    )
+
+
+def equipment_hazardous_material(row):
+    return first_value(
+        row,
+        "hazardousMaterial",
+        "HazardousMaterial",
+        "materialClassification",
+        "MaterialClassification",
+        
+    )
+
+
+def hazard_marker_label(row):
+    name = equipment_name(row)
+    material = equipment_hazardous_material(row)
+
+    if name and material:
+        return f"{name} containing {material}"
+    if name:
+        return f"{name} containing"
+    if material:
+        return f"Containing {material}"
+    return equipment_sample_no(row)
+
+
+def marker_label(marker):
+    return first_value(marker, "markerLabel", "MarkerLabel", "sampleNo", "Sample_No")
+
+
+def marker_image_path(marker):
+    return first_value(marker, "imagePath", "ImagePath")
+
+
+def dedupe_latest_markers(markers):
+    latest = {}
+
+    for marker in markers:
+        label = marker_label(marker).upper()
+        image_path = normalize_web_path(marker_image_path(marker))
+        if not label or not image_path:
+            continue
+
+        key = (label, image_path)
+        marker_id = int(marker.get("id") or marker.get("Id") or 0)
+
+        existing = latest.get(key)
+        existing_id = int(existing.get("id") or existing.get("Id") or 0) if existing else -1
+
+        if existing is None or marker_id >= existing_id:
+            latest[key] = marker
+
+    return list(latest.values())
+
+
+def wrap_pil_text(draw, text, font, max_width):
+    words = str(text or "").split()
+    lines = []
+    current = ""
+
+    for word in words:
+        test = word if not current else f"{current} {word}"
+        box = draw.textbbox((0, 0), test, font=font)
+
+        if box[2] - box[0] <= max_width:
+            current = test
+            continue
+
+        if current:
+            lines.append(current)
+        current = word
+
+    if current:
+        lines.append(current)
+
+    return lines or [""]
+
+
+def draw_hazard_marked_layout_image(source_path, marker_items, output_path):
+    base = Image.open(source_path).convert("RGB")
+    image_w, image_h = base.size
+
+    outer_pad = 220
+    canvas_img = Image.new(
+        "RGB",
+        (image_w + outer_pad * 2, image_h + outer_pad * 2),
+        (255, 255, 255)
+    )
+    canvas_img.paste(base, (outer_pad, outer_pad))
+
+    draw = ImageDraw.Draw(canvas_img)
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 16)
+    except OSError:
+        font = ImageFont.load_default()
+
+    blue = (0, 0, 255)
+    white = (255, 255, 255)
+
+    placements = []
+    used_boxes = []
+    label_h_base = 28
+    gap = 12
+    line_gap = 28
+    margin = 8
+
+    layout_x = outer_pad
+    layout_y = outer_pad
+    layout_right = outer_pad + image_w
+    layout_bottom = outer_pad + image_h
+
+    for item in marker_items:
+        marker = item["marker"]
+        label = item["label"]
+
+        x = outer_pad + (float(marker.get("xPercent") or marker.get("XPercent") or 0) / 100) * image_w
+        y = outer_pad + (float(marker.get("yPercent") or marker.get("YPercent") or 0) / 100) * image_h
+
+
+        max_label_w = 210
+        lines = wrap_pil_text(draw, label, font, max_label_w - 14)
+        line_h = 18
+        label_w = max(
+            90,
+            min(
+                max_label_w,
+                max(draw.textbbox((0, 0), line, font=font)[2] for line in lines) + 14
+            )
+        )
+        label_h = max(label_h_base, len(lines) * line_h + 10)
+
+        # Keep callouts on left/right so connector lines stay mostly horizontal
+        # and do not cut vertically through rooms/cells.
+        dist_left = x - layout_x
+        dist_right = layout_right - x
+
+        if dist_left <= dist_right:
+            side = "left"
+            box_x = layout_x - line_gap - label_w
+            box_y = y - label_h / 2
+            line_end = (box_x + label_w, box_y + label_h / 2)
+        else:
+            side = "right"
+            box_x = layout_right + line_gap
+            box_y = y - label_h / 2
+            line_end = (box_x, box_y + label_h / 2)
+
+        box_x = max(margin, min(box_x, canvas_img.size[0] - label_w - margin))
+        box_y = max(margin, min(box_y, canvas_img.size[1] - label_h - margin))
+
+                # Push label away from existing labels, but never loop forever.
+        for _ in range(30):
+            x1, y1, x2, y2 = box_x, box_y, box_x + label_w, box_y + label_h
+            moved = False
+
+            for old_x1, old_y1, old_x2, old_y2 in used_boxes:
+                overlaps = not (
+                    x2 + gap < old_x1 or
+                    x1 - gap > old_x2 or
+                    y2 + gap < old_y1 or
+                    y1 - gap > old_y2
+                )
+                if not overlaps:
+                    continue
+
+                old_box_y = box_y
+
+                if side == "top":
+                    box_y = old_y1 - label_h - gap
+                else:
+                    box_y = old_y2 + gap
+
+                box_y = max(margin, min(box_y, canvas_img.size[1] - label_h - margin))
+
+                moved = abs(box_y - old_box_y) > 0.1
+                break
+
+            if not moved:
+                break
+
+        if side == "left":
+            line_end = (box_x + label_w, box_y + label_h / 2)
+        else:
+            line_end = (box_x, box_y + label_h / 2)
+
+        box = (box_x, box_y, box_x + label_w, box_y + label_h)
+        used_boxes.append(box)
+
+        placements.append({
+            "x": x,
+            "y": y,
+            "box": box,
+            "line_end": line_end,
+            "lines": lines,
+            "label_h": label_h,
+        })
+
+    for item in placements:
+        x = item["x"]
+        y = item["y"]
+        line_end = item["line_end"]
+
+        draw.line([x, y, line_end[0], line_end[1]], fill=blue, width=2)
+
+        dot_radius = 4
+        draw.ellipse(
+            [x - dot_radius, y - dot_radius, x + dot_radius, y + dot_radius],
+            outline=blue,
+            fill=white,
+            width=2,
+        )
+
+    for item in placements:
+        x1, y1, x2, y2 = item["box"]
+        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=2)
+
+        text_y = y1 + 6
+        for line in item["lines"]:
+            draw.text((x1 + 7, text_y), line, fill=blue, font=font)
+            text_y += 18
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas_img.save(output_path)
+    return output_path
+
+
+def build_i2_hazard_layout_images(data):
+    equipment_rows = get_rows(data, "equipmentAndMachinery", "equipment")
+    markers = dedupe_latest_markers(data.get("markers") or [])
+    markers_by_label = {}
+
+    for marker in markers:
+        label = marker_label(marker).upper()
+        if label:
+            markers_by_label.setdefault(label, []).append(marker)
+
+    grouped_by_image = {}
+
+    for row in equipment_rows:
+        sample_no = equipment_sample_no(row).upper()
+        if not sample_no:
+            continue
+
+        row_markers = markers_by_label.get(sample_no) or []
+        if not row_markers:
+            continue
+
+        label = hazard_marker_label(row)
+
+        for marker in row_markers:
+            image_path = marker_image_path(marker)
+            normalized = normalize_web_path(image_path)
+
+            if not normalized:
+                continue
+
+            grouped_by_image.setdefault(normalized, {
+                "source": image_path,
+                "items": []
+            })
+            grouped_by_image[normalized]["items"].append({
+                "marker": marker,
+                "label": label,
+            })
+
+    generated = []
+    print(f"I-2 hazard layout image groups: {len(grouped_by_image)}", file=sys.stderr)
+    output_dir = Path.cwd() / "wwwroot" / "reports" / "ihm" / str((data.get("job") or {}).get("id") or "0") / "i2-hazard-layouts"
+
+    for index, group in enumerate(grouped_by_image.values(), start=1):
+        source_path = resolve_report_image_path(group["source"])
+        if not source_path or not source_path.exists():
+            continue
+
+        output_path = output_dir / f"i2-hazard-layout-{index}.png"
+        generated.append(draw_hazard_marked_layout_image(
+            source_path,
+            group["items"],
+            output_path
+        ))
+
+    return generated
+
+
+def make_i2_hazard_layout_pages(data, vessel_name, company_name):
+    images = build_i2_hazard_layout_images(data)
+    pages = []
+
+    for image_path in images:
+        packet = BytesIO()
+        c = canvas.Canvas(
+            packet,
+            pagesize=(HAZARD_LAYOUT_PAGE_WIDTH, HAZARD_LAYOUT_PAGE_HEIGHT)
+        )
+
+        draw_common_header_footer(
+            c,
+            vessel_name=vessel_name,
+            company_name=company_name,
+            page_no_text="Page | "
+        )
+
+        usable_x = 45
+        usable_y = 75
+        usable_w = HAZARD_LAYOUT_PAGE_WIDTH - 90
+        usable_h = HAZARD_LAYOUT_PAGE_HEIGHT - 145
+
+        img = Image.open(image_path)
+        img_w, img_h = img.size
+        scale = min(usable_w / img_w, usable_h / img_h)
+        draw_w = img_w * scale
+        draw_h = img_h * scale
+
+        c.drawImage(
+            str(image_path),
+            (HAZARD_LAYOUT_PAGE_WIDTH - draw_w) / 2,
+            usable_y + (usable_h - draw_h) / 2,
+            width=draw_w,
+            height=draw_h,
+            preserveAspectRatio=True,
+            mask="auto"
+        )
+
+        c.save()
+        packet.seek(0)
+        pages.extend(list(PdfReader(packet).pages))
+
+    return pages
 
 def get_rows(data, *keys):
     for key in keys:
@@ -486,4 +894,12 @@ def make_hazardous_materials_a3_page(data):
     packet.seek(0)
 
     reader = PdfReader(packet)
-    return list(reader.pages)
+    pages = list(reader.pages)
+
+    pages.extend(make_i2_hazard_layout_pages(
+        data,
+        vessel_name=vessel_name,
+        company_name=company_name
+    ))
+
+    return pages

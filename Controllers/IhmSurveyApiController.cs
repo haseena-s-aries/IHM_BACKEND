@@ -1450,6 +1450,7 @@ namespace Survey_Certification_App.Controllers
                 .Select(x => new
                 {
                     IhmCheckpointId = x.Id,
+                    Sample_No = x.Sample_No,
                     x.EquipmentName,
                     x.Location,
                     MaterialClassification = x.HazardousMaterial,
@@ -1505,6 +1506,8 @@ namespace Survey_Certification_App.Controllers
 
                     return new
                     {
+                        x.IhmCheckpointId,
+                        x.Sample_No,
                         saved.EquipmentName,
                         saved.Location,
                         saved.MaterialClassification,
@@ -1518,6 +1521,8 @@ namespace Survey_Certification_App.Controllers
 
                 return new
                 {
+                    x.IhmCheckpointId,
+                    x.Sample_No,
                     x.EquipmentName,
                     x.Location,
                     x.MaterialClassification,
@@ -1532,19 +1537,21 @@ namespace Survey_Certification_App.Controllers
             .ToList();
 
             var manualEquipmentRows = savedEquipmentRows
-                 .Where(x => !x.IhmCheckpointId.HasValue && !x.IsHidden)
-                .Select(x => new
-                {
-                    x.EquipmentName,
-                    x.Location,
-                    x.MaterialClassification,
-                    x.PartsWereUsed,
-                    x.UnitKg,
-                    x.QuantityNo,
-                    x.TotalKg,
-                    x.Remarks
-                })
-                .ToList();
+             .Where(x => !x.IhmCheckpointId.HasValue && !x.IsHidden)
+            .Select(x => new
+            {
+                IhmCheckpointId = 0,
+                Sample_No = "",
+                x.EquipmentName,
+                x.Location,
+                x.MaterialClassification,
+                x.PartsWereUsed,
+                x.UnitKg,
+                x.QuantityNo,
+                x.TotalKg,
+                x.Remarks
+            })
+            .ToList();
             var necessaryInformationPoints = await _db.IhmNecessaryInformationPoints
                 .Where(x => x.SurveyJobId == jobId)
                 .OrderBy(x => x.SortOrder)

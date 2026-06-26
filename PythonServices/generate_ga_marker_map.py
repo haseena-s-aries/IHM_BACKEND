@@ -74,6 +74,26 @@ def marker_area_id(marker):
     except (TypeError, ValueError):
         return None
 
+def dedupe_markers_by_label_and_image(markers):
+    latest = {}
+
+    for marker in markers:
+        label = str(marker.get("markerLabel") or "").strip()
+        image_path = normalized_web_path(marker.get("imagePath"))
+
+        if not label or not image_path:
+            continue
+
+        key = (label.upper(), image_path)
+        marker_id = int(marker.get("id") or 0)
+
+        existing = latest.get(key)
+        existing_id = int(existing.get("id") or 0) if existing else -1
+
+        if existing is None or marker_id >= existing_id:
+            latest[key] = marker
+
+    return list(latest.values())
 
 def find_template_position(ga_image_path, area_image_path):
     ga = cv2.imread(str(ga_image_path), cv2.IMREAD_GRAYSCALE)
@@ -140,7 +160,11 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
     if not marker_points:
         return
 
-    font = ImageFont.load_default()
+    try:
+        font = ImageFont.truetype("arial.ttf", 20)
+    except OSError:
+        font = ImageFont.load_default()
+
     blue = (0, 0, 255)
     white = (255, 255, 255)
 
@@ -151,16 +175,16 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
 
     groups = group_markers(marker_points, tolerance=8)
 
-    label_h = 18
-    gap = 7
+    label_h = 28
+    gap = 12
     margin = 8
-    line_length = 70
+    line_gap = 22
 
     side_groups = {
         "top": [],
         "bottom": [],
         "left": [],
-        "right": []
+        "right": [],
     }
 
     for group in groups:
@@ -188,87 +212,133 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
     side_groups["left"].sort(key=lambda g: g["y"])
     side_groups["right"].sort(key=lambda g: g["y"])
 
-    occupied = {
+    lanes = {
         "top": [],
         "bottom": [],
         "left": [],
-        "right": []
+        "right": [],
     }
+
+    def reserve_horizontal_lane(side, x1, x2):
+        for lane_index, lane_items in enumerate(lanes[side]):
+            overlaps = any(
+                not (x2 + gap < old_x1 or x1 - gap > old_x2)
+                for old_x1, old_x2 in lane_items
+            )
+            if not overlaps:
+                lane_items.append((x1, x2))
+                return lane_index
+
+        lanes[side].append([(x1, x2)])
+        return len(lanes[side]) - 1
+
+    def reserve_vertical_lane(side, y1, y2):
+        for lane_index, lane_items in enumerate(lanes[side]):
+            overlaps = any(
+                not (y2 + gap < old_y1 or y1 - gap > old_y2)
+                for old_y1, old_y2 in lane_items
+            )
+            if not overlaps:
+                lane_items.append((y1, y2))
+                return lane_index
+
+        lanes[side].append([(y1, y2)])
+        return len(lanes[side]) - 1
+
+    placements = []
 
     for side, items in side_groups.items():
         for group in items:
             label = ",".join(group["labels"])
-            text_w, _ = text_size(draw, label, font)
-            label_w = max(44, text_w + 10)
+            text_w, text_h = text_size(draw, label, font)
+            label_w = max(58, text_w + 16)
 
             if side == "top":
                 box_x = group["x"] - label_w / 2
-                box_y = layout_y - line_length
                 box_x = max(margin, min(box_x, canvas_w - label_w - margin))
-
-                for old_x1, old_y1, old_x2, old_y2 in occupied[side]:
-                    if not (box_x + label_w < old_x1 or box_x > old_x2):
-                        box_y = min(box_y, old_y1 - label_h - gap)
-
+                lane = reserve_horizontal_lane(side, box_x, box_x + label_w)
+                box_y = layout_y - line_gap - ((lane + 1) * (label_h + gap))
                 box_y = max(margin, box_y)
                 line_end = (box_x + label_w / 2, box_y + label_h)
+                route = (group["x"], line_end[1] + (line_gap / 2))
 
             elif side == "bottom":
                 box_x = group["x"] - label_w / 2
-                box_y = layout_bottom + line_length - label_h
                 box_x = max(margin, min(box_x, canvas_w - label_w - margin))
-
-                for old_x1, old_y1, old_x2, old_y2 in occupied[side]:
-                    if not (box_x + label_w < old_x1 or box_x > old_x2):
-                        box_y = max(box_y, old_y2 + gap)
-
+                lane = reserve_horizontal_lane(side, box_x, box_x + label_w)
+                box_y = layout_bottom + line_gap + (lane * (label_h + gap))
                 box_y = min(box_y, canvas_h - label_h - margin)
                 line_end = (box_x + label_w / 2, box_y)
+                route = (group["x"], line_end[1] - (line_gap / 2))
 
             elif side == "left":
-                box_x = layout_x - line_length - label_w
                 box_y = group["y"] - label_h / 2
                 box_y = max(margin, min(box_y, canvas_h - label_h - margin))
-
-                for old_x1, old_y1, old_x2, old_y2 in occupied[side]:
-                    if not (box_y + label_h < old_y1 or box_y > old_y2):
-                        box_y = old_y2 + gap
-
-                box_y = min(box_y, canvas_h - label_h - margin)
+                lane = reserve_vertical_lane(side, box_y, box_y + label_h)
+                box_x = layout_x - line_gap - label_w - (lane * (label_w + gap))
                 box_x = max(margin, box_x)
                 line_end = (box_x + label_w, box_y + label_h / 2)
+                route = (line_end[0] + (line_gap / 2), group["y"])
 
             else:
-                box_x = layout_right + line_length
                 box_y = group["y"] - label_h / 2
                 box_y = max(margin, min(box_y, canvas_h - label_h - margin))
-
-                for old_x1, old_y1, old_x2, old_y2 in occupied[side]:
-                    if not (box_y + label_h < old_y1 or box_y > old_y2):
-                        box_y = old_y2 + gap
-
-                box_y = min(box_y, canvas_h - label_h - margin)
+                lane = reserve_vertical_lane(side, box_y, box_y + label_h)
+                box_x = layout_right + line_gap + (lane * (label_w + gap))
                 box_x = min(box_x, canvas_w - label_w - margin)
                 line_end = (box_x, box_y + label_h / 2)
+                route = (line_end[0] - (line_gap / 2), group["y"])
 
-            x1 = box_x
-            y1 = box_y
-            x2 = box_x + label_w
-            y2 = box_y + label_h
+            placements.append({
+                "group": group,
+                "label": label,
+                "text_h": text_h,
+                "box": (box_x, box_y, box_x + label_w, box_y + label_h),
+                "line_end": line_end,
+                "route": route,
+            })
 
-            occupied[side].append((x1, y1, x2, y2))
+    # Draw connectors first. Label rectangles are drawn after this, so lines
+    # cannot visibly cut through label boxes.
+    for item in placements:
+        group = item["group"]
+        route_x, route_y = item["route"]
+        end_x, end_y = item["line_end"]
 
-            draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=1)
-            draw.text((x1 + 5, y1 + 3), label, fill=blue, font=font)
+        draw.line(
+            [group["x"], group["y"], route_x, route_y, end_x, end_y],
+            fill=blue,
+            width=2,
+        )
 
-            draw.line([group["x"], group["y"], line_end[0], line_end[1]], fill=blue, width=1)
+        dot_radius = 4
+        draw.ellipse(
+            [
+                group["x"] - dot_radius,
+                group["y"] - dot_radius,
+                group["x"] + dot_radius,
+                group["y"] + dot_radius,
+            ],
+            outline=blue,
+            fill=white,
+            width=2,
+        )
 
-            arrow = 4
-            draw.line([group["x"], group["y"], group["x"] + arrow, group["y"] - arrow], fill=blue, width=1)
-            draw.line([group["x"], group["y"], group["x"] + arrow, group["y"] + arrow], fill=blue, width=1)
+    # Draw labels last so no connector line cuts through a label/cell.
+    for item in placements:
+        x1, y1, x2, y2 = item["box"]
+        label = item["label"]
+        text_h = item["text_h"]
 
+        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=2)
+        draw.text(
+            (x1 + 8, y1 + max(2, (label_h - text_h) / 2 - 1)),
+            label,
+            fill=blue,
+            font=font,
+        )
 
-def marker_points_for_image(markers, image_width, image_height, outer_pad):
+def marker_points_for_image(markers, image_width, image_height, outer_pad, y_offset=0):
     points = []
 
     for marker in markers:
@@ -276,9 +346,14 @@ def marker_points_for_image(markers, image_width, image_height, outer_pad):
         if not label:
             continue
 
+        x = outer_pad + (float(marker.get("xPercent") or 0) / 100) * image_width
+        y = outer_pad + (float(marker.get("yPercent") or 0) / 100) * image_height + y_offset
+
+        y = max(outer_pad, min(y, outer_pad + image_height))
+
         points.append({
-            "x": outer_pad + (float(marker.get("xPercent") or 0) / 100) * image_width,
-            "y": outer_pad + (float(marker.get("yPercent") or 0) / 100) * image_height,
+            "x": x,
+            "y": y,
             "label": label
         })
 
@@ -339,7 +414,7 @@ def main():
     base_img = Image.open(ga_path).convert("RGB")
     ga_w, ga_h = base_img.size
 
-    outer_pad = 120
+    outer_pad = 180
 
     ga_img = Image.new(
         "RGB",
@@ -378,19 +453,20 @@ def main():
         markers_by_area.setdefault(int(area_id), []).append(marker)
 
     output_placements = []
+    common_markers = dedupe_markers_by_label_and_image(
+    [
+        marker
+        for marker in markers
+        if marker_matches_image(marker, data.get("gaLayout"))
+    ]
+    )
+
     common_marker_points = marker_points_for_image(
-        [
-            marker
-            for marker in markers
-            if marker_matches_image(marker, data.get("gaLayout"))
-            or (
-                not normalized_web_path(marker.get("imagePath"))
-                and marker_area_id(marker) not in areas_with_layout
-            )
-        ],
+        common_markers,
         ga_w,
         ga_h,
-        outer_pad
+        outer_pad,
+        y_offset=65
     )
     generated_layouts = [{
         "kind": "common",
@@ -483,23 +559,6 @@ def main():
             "isAutoMatched": is_auto
         })
 
-        marker_points = []
-
-        for marker in image_markers:
-            marker_x = x + (float(marker.get("xPercent") or 0) / 100) * w
-            marker_y = y + (float(marker.get("yPercent") or 0) / 100) * h
-
-            label = str(marker.get("markerLabel") or "").strip()
-            if not label:
-                continue
-
-            marker_points.append({
-                "x": marker_x,
-                "y": marker_y,
-                "label": label
-            })
-
-        common_marker_points.extend(marker_points)
 
     draw_callout_markers(
         draw,
