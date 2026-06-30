@@ -130,7 +130,9 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
     y_hazard = 440
     y_method = 395
     y_result = 350
-    y_bottom = 315
+    y_quantity = 315
+    y_quantity = 315
+    y_bottom = 280
 
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.7)
@@ -140,7 +142,7 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
 
     c.line(x_second, y_image_bottom, x_second, y_top)
 
-    for y in [y_top, y_image_bottom, y_item, y_hazard, y_method, y_result, y_bottom]:
+    for y in [y_top, y_image_bottom, y_item, y_hazard, y_method, y_result, y_quantity, y_bottom]:
         c.line(x_left, y, x_right, y)
 
     _draw_wrapped_centered_text(
@@ -196,6 +198,14 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
         "QUANTITY",
         _quantity_text(checkpoint),
         y_result,
+        y_quantity
+    )
+
+    _draw_row(
+        c,
+        "SITE\nREMARKS",
+        checkpoint.get("locationRemarks") or checkpoint.get("LocationRemarks") or checkpoint.get("Location_Remark") or "-",
+        y_quantity,
         y_bottom
     )
 

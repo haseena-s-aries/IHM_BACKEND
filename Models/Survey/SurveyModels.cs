@@ -58,6 +58,8 @@ namespace Survey_Certification_App.Models.Survey
 
         public DateTime? StartDate { get; set; }
 
+        public DateTime? SurveyDate { get; set; }
+
         public DateTime? EndDate { get; set; }
 
         public SurveyJobStatus Status { get; set; } = SurveyJobStatus.Draft;

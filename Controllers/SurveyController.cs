@@ -164,6 +164,7 @@ namespace Survey_Certification_App.Controllers
 
                 SiteName = request.SiteName,
                 StartDate = request.StartDate,
+        
                 EndDate = request.EndDate,
                 Status = SurveyJobStatus.Draft,
                 CreatedByUserId = createdBy,
@@ -191,6 +192,7 @@ namespace Survey_Certification_App.Controllers
             job.ImoNumber = request.ImoNumber;
             job.SiteName = request.SiteName;
             job.StartDate = request.StartDate;
+          
             job.EndDate = request.EndDate;
             job.UpdatedAt = DateTime.UtcNow;
 
@@ -252,7 +254,25 @@ namespace Survey_Certification_App.Controllers
 
             return Ok(ToDto(job));
         }
+        [HttpPost("jobs/{id:int}/survey-date")]
+        public async Task<IActionResult> UpdateSurveyDate(int id, [FromBody] UpdateSurveyDateRequest request)
+        {
+            var job = await _db.SurveyJobs.FindAsync(id);
 
+            if (job == null)
+                return NotFound("Survey job not found.");
+
+            if (request.SurveyDate == null)
+                return BadRequest("Survey date is required.");
+
+            job.SurveyDate = request.SurveyDate;
+            job.Status = SurveyJobStatus.InProgress;
+            job.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync();
+
+            return Ok(ToDto(job));
+        }
         [HttpPost("jobs/{id:int}/status")]
         public async Task<IActionResult> UpdateStatus(int id, [FromBody] UpdateSurveyJobStatusRequest request)
         {
@@ -262,6 +282,12 @@ namespace Survey_Certification_App.Controllers
                 return NotFound("Survey job not found.");
 
             job.Status = request.Status;
+
+            if (request.Status == SurveyJobStatus.InProgress && job.SurveyDate == null)
+            {
+                job.SurveyDate = request.SurveyDate ?? DateTime.Today;
+            }
+
             job.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
@@ -780,6 +806,7 @@ namespace Survey_Certification_App.Controllers
                 ImoNumber = job.ImoNumber,
                 SiteName = job.SiteName,
                 StartDate = job.StartDate,
+                SurveyDate = job.SurveyDate,
                 EndDate = job.EndDate,
                 Status = job.Status.ToString(),
                 CreatedByUserId = job.CreatedByUserId,
@@ -855,10 +882,15 @@ namespace Survey_Certification_App.Controllers
 
             public int? AssignedByUserId { get; set; }
         }
-
+        public class UpdateSurveyDateRequest
+        {
+            public DateTime? SurveyDate { get; set; }
+        }
         public class UpdateSurveyJobStatusRequest
         {
             public SurveyJobStatus Status { get; set; }
+
+            public DateTime? SurveyDate { get; set; }
         }
 
         public class SurveyJobDto
@@ -885,6 +917,8 @@ namespace Survey_Certification_App.Controllers
             public string? SiteName { get; set; }
 
             public DateTime? StartDate { get; set; }
+
+            public DateTime? SurveyDate { get; set; }
 
             public DateTime? EndDate { get; set; }
 

@@ -114,7 +114,8 @@ namespace Survey_Certification_App.Controllers
                     return new
                     {
                         userId = x.Id,
-                        name = x.FullName,
+                        userName = DisplayName(x),
+                        name = DisplayName(x),
                         login = x.Username ?? x.Email,
                         email = x.Email,
                         role = x.Role,
@@ -184,7 +185,9 @@ namespace Survey_Certification_App.Controllers
                 {
                     totalRegisteredUsers = filteredUserList.Count,
                     activeUsers = filteredUserList.Count(x => x.IsApproved && !x.IsRejected),
+                    inactiveUsers = filteredUserList.Count(x => !x.IsApproved || x.IsRejected),
                     inactiveOrDisabledUsers = filteredUserList.Count(x => !x.IsApproved || x.IsRejected),
+                    usersWithActivityInRange = activeUserIdsInRange.Count,
                     usersWithActivityInSelectedRange = activeUserIdsInRange.Count,
                     usersWithNoActivityLast30Days = CountInactiveSince(filteredUserList, lastActivityByUser.ToDictionary(x => x.Key, x => x.Value.LastActivityDate), utcToday.AddDays(-30)),
                     usersWithNoActivityLast60Days = CountInactiveSince(filteredUserList, lastActivityByUser.ToDictionary(x => x.Key, x => x.Value.LastActivityDate), utcToday.AddDays(-60)),
@@ -195,19 +198,23 @@ namespace Survey_Certification_App.Controllers
                     .GroupBy(x => x.Department!)
                     .Select(g => new
                     {
+                        name = g.Key,
                         department = g.Key,
                         userCount = g.Count(),
+                        activeUserCount = g.Count(x => x.IsApproved && !x.IsRejected),
                         activeUsers = g.Count(x => x.IsApproved && !x.IsRejected)
                     })
                     .OrderBy(x => x.department)
-                    .DefaultIfEmpty(new { department = "Not available", userCount = 0, activeUsers = 0 })
+                    .DefaultIfEmpty(new { name = "Not available", department = "Not available", userCount = 0, activeUserCount = 0, activeUsers = 0 })
                     .ToList(),
                 roleSummary = filteredUserList
                     .GroupBy(x => string.IsNullOrWhiteSpace(x.Role) ? "Not available" : x.Role)
                     .Select(g => new
                     {
+                        name = g.Key,
                         role = g.Key,
                         userCount = g.Count(),
+                        activeUserCount = g.Count(x => x.IsApproved && !x.IsRejected),
                         activeUsers = g.Count(x => x.IsApproved && !x.IsRejected)
                     })
                     .OrderBy(x => x.role)
@@ -240,7 +247,7 @@ namespace Survey_Certification_App.Controllers
                 {
                     roles = users.Select(x => x.Role).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().OrderBy(x => x),
                     departments = users.Select(x => x.Department).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().OrderBy(x => x),
-                    users = users.OrderBy(x => x.FullName).Select(x => new { id = x.Id, name = x.FullName, email = x.Email }),
+                    users = users.OrderBy(DisplayName).Select(x => new { id = x.Id, name = DisplayName(x), email = x.Email }),
                     modules = allActivities.Select(x => x.ModuleName).Distinct().OrderBy(x => x),
                     activityStatuses = new[] { "Active", "Inactive 30+ Days", "Inactive 60+ Days", "Inactive 90+ Days", "Never Active" }
                 },
@@ -466,6 +473,20 @@ namespace Survey_Certification_App.Controllers
                 return "Inactive 30+ Days";
 
             return "Active";
+        }
+
+        private static string DisplayName(AnalyticsUser user)
+        {
+            if (!string.IsNullOrWhiteSpace(user.FullName))
+                return user.FullName;
+
+            if (!string.IsNullOrWhiteSpace(user.Username))
+                return user.Username;
+
+            if (!string.IsNullOrWhiteSpace(user.Email))
+                return user.Email;
+
+            return $"User #{user.Id}";
         }
 
         private enum ActivityKind

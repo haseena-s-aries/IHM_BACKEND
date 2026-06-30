@@ -19,6 +19,8 @@ namespace Survery_Certification_App_Consume.Models.Survey
 
         public DateTime? StartDate { get; set; }
 
+        public DateTime? SurveyDate { get; set; }
+
         public DateTime? EndDate { get; set; }
     }
 
@@ -60,6 +62,8 @@ namespace Survery_Certification_App_Consume.Models.Survey
         public string? SiteName { get; set; }
 
         public DateTime? StartDate { get; set; }
+
+        public DateTime? SurveyDate { get; set; }
 
         public DateTime? EndDate { get; set; }
 

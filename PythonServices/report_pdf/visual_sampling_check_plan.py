@@ -110,7 +110,7 @@ def build_visual_sampling_rows(data):
         ("SHIP MANAGER", get_value((vessel, "shipManager"), (vessel, "managerName"))),
         ("CONTACT POINT", get_report_value(report, "shipManagerContact", "")),
         ("Site of Check", get_value((survey_job, "auditPort"), (survey_job, "Audit Port"))),
-        ("Date of Survey", format_date(get_value((survey_job, "startDate"), (survey, "startdate")))),
+        ("Date of Survey", format_date(get_value((survey_job, "surveyDate"), (survey, "surveyDate"), (survey_job, "startDate"), (survey, "startdate")))),
         ("Hazmat Expert /Sampling Engineer", get_report_value(report, "hazmatExpert", "")),
         (
             "Sampling Methodology",
@@ -538,7 +538,7 @@ def make_onboard_visual_sampling_overlay(page_width, page_height, data):
     x = 180
 
     survey_date = format_date(
-        get_value((survey_job, "startDate"), (survey, "startdate"))
+        get_value((survey_job, "surveyDate"), (survey, "surveyDate"), (survey_job, "surveyDate"), (survey, "surveyDate"), (survey_job, "startDate"), (survey, "startdate"))
     )
     audit_port = get_value((survey_job, "auditPort"), (survey_job, "Audit Port"))
     hazmat_expert = get_report_value(report, "hazmatExpert", "")

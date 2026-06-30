@@ -568,7 +568,8 @@ namespace Survey_Certification_App.Controllers
         public async Task<IActionResult> UploadCheckpointPhoto(
             int jobId,
             int checkpointId,
-            IFormFile file,
+            IFormFile? file,
+            List<IFormFile>? files,
             [FromForm] string? caption,
             [FromForm] int? uploadedByUserId)
         {
@@ -578,14 +579,18 @@ namespace Survey_Certification_App.Controllers
             if (checkpoint == null)
                 return NotFound("IHM checkpoint not found.");
 
-            if (file == null || file.Length == 0)
+            var uploadFiles = new List<IFormFile>();
+
+            if (files != null)
+                uploadFiles.AddRange(files.Where(x => x != null && x.Length > 0));
+
+            if (file != null && file.Length > 0)
+                uploadFiles.Add(file);
+
+            if (uploadFiles.Count == 0)
                 return BadRequest("Image file is required.");
 
             var allowedExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
-            var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
-
-            if (!allowedExtensions.Contains(extension))
-                return BadRequest("Only image files are allowed.");
 
             var uploadFolder = Path.Combine(
                 Directory.GetCurrentDirectory(),
@@ -598,31 +603,44 @@ namespace Survey_Certification_App.Controllers
 
             Directory.CreateDirectory(uploadFolder);
 
-            var storedFileName = $"{Guid.NewGuid()}.jpg";
-            var filePath = Path.Combine(uploadFolder, storedFileName);
+            var uploadedPhotos = new List<IhmSamplingPhoto>();
 
-            await SaveCompressedPhotoAsync(file, filePath);
-
-            var relativePath = $"/uploads/ihm-sampling/{jobId}/{checkpointId}/{storedFileName}";
-
-            var photo = new IhmSamplingPhoto
+            foreach (var uploadFile in uploadFiles)
             {
-                SurveyJobId = jobId,
-                IhmAreaId = checkpoint.IhmAreaId,
-                IhmCheckpointId = checkpoint.Id,
-                OriginalFileName = file.FileName,
-                StoredFileName = storedFileName,
-                FilePath = relativePath,
-                ContentType = "image/jpeg",
-                Caption = caption,
-                UploadedByUserId = uploadedByUserId ?? GetCurrentUserId() ?? 0,
-                UploadedAt = DateTime.UtcNow
-            };
+                var extension = Path.GetExtension(uploadFile.FileName).ToLowerInvariant();
 
-            _db.IhmSamplingPhotos.Add(photo);
+                if (!allowedExtensions.Contains(extension))
+                    return BadRequest("Only image files are allowed.");
+
+                var storedFileName = $"{Guid.NewGuid()}.jpg";
+                var filePath = Path.Combine(uploadFolder, storedFileName);
+
+                await SaveCompressedPhotoAsync(uploadFile, filePath);
+
+                var relativePath = $"/uploads/ihm-sampling/{jobId}/{checkpointId}/{storedFileName}";
+
+                uploadedPhotos.Add(new IhmSamplingPhoto
+                {
+                    SurveyJobId = jobId,
+                    IhmAreaId = checkpoint.IhmAreaId,
+                    IhmCheckpointId = checkpoint.Id,
+                    OriginalFileName = uploadFile.FileName,
+                    StoredFileName = storedFileName,
+                    FilePath = relativePath,
+                    ContentType = "image/jpeg",
+                    Caption = caption,
+                    UploadedByUserId = uploadedByUserId ?? GetCurrentUserId() ?? 0,
+                    UploadedAt = DateTime.UtcNow
+                });
+            }
+
+            _db.IhmSamplingPhotos.AddRange(uploadedPhotos);
             await _db.SaveChangesAsync();
 
-            return Ok(ToSamplingPhotoDto(photo));
+            if (uploadedPhotos.Count == 1)
+                return Ok(ToSamplingPhotoDto(uploadedPhotos[0]));
+
+            return Ok(uploadedPhotos.Select(ToSamplingPhotoDto).ToList());
         }
         [HttpDelete("sampling-photos/{photoId:int}")]
         public async Task<IActionResult> DeleteSamplingPhoto(int photoId)
@@ -1711,6 +1729,7 @@ namespace Survey_Certification_App.Controllers
                     job.AuditPort,
                     job.AuditAddress,
                     job.StartDate,
+                    job.SurveyDate,
                     job.EndDate,
                     Status = job.Status.ToString()
                 },

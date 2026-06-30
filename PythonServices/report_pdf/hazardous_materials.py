@@ -235,21 +235,61 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path):
         )
         label_h = max(label_h_base, len(lines) * line_h + 10)
 
-        # Keep callouts on left/right so connector lines stay mostly horizontal
-        # and do not cut vertically through rooms/cells.
-        dist_left = x - layout_x
-        dist_right = layout_right - x
+        candidate_sides = sorted(
+            [
+                ("left", x - layout_x),
+                ("right", layout_right - x),
+                ("top", y - layout_y),
+                ("bottom", layout_bottom - y),
+            ],
+            key=lambda item: item[1]
+        )
 
-        if dist_left <= dist_right:
-            side = "left"
-            box_x = layout_x - line_gap - label_w
-            box_y = y - label_h / 2
-            line_end = (box_x + label_w, box_y + label_h / 2)
-        else:
-            side = "right"
-            box_x = layout_right + line_gap
-            box_y = y - label_h / 2
-            line_end = (box_x, box_y + label_h / 2)
+        def make_candidate_box(candidate_side):
+            if candidate_side == "top":
+                return (
+                    x - label_w / 2,
+                    layout_y - line_gap - label_h
+                )
+            if candidate_side == "bottom":
+                return (
+                    x - label_w / 2,
+                    layout_bottom + line_gap
+                )
+            if candidate_side == "left":
+                return (
+                    layout_x - line_gap - label_w,
+                    y - label_h / 2
+                )
+            return (
+                layout_right + line_gap,
+                y - label_h / 2
+            )
+
+        side = candidate_sides[0][0]
+        box_x, box_y = make_candidate_box(side)
+
+        for candidate_side, _ in candidate_sides:
+            test_x, test_y = make_candidate_box(candidate_side)
+            test_x = max(margin, min(test_x, canvas_img.size[0] - label_w - margin))
+            test_y = max(margin, min(test_y, canvas_img.size[1] - label_h - margin))
+
+            test_box = (test_x, test_y, test_x + label_w, test_y + label_h)
+            has_overlap = any(
+                not (
+                    test_box[2] + gap < old_x1 or
+                    test_box[0] - gap > old_x2 or
+                    test_box[3] + gap < old_y1 or
+                    test_box[1] - gap > old_y2
+                )
+                for old_x1, old_y1, old_x2, old_y2 in used_boxes
+            )
+
+            if not has_overlap:
+                side = candidate_side
+                box_x = test_x
+                box_y = test_y
+                break
 
         box_x = max(margin, min(box_x, canvas_img.size[0] - label_w - margin))
         box_y = max(margin, min(box_y, canvas_img.size[1] - label_h - margin))
@@ -284,10 +324,14 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path):
             if not moved:
                 break
 
-        if side == "left":
-            line_end = (box_x + label_w, box_y + label_h / 2)
+        if side == "top":
+            line_end = (x, box_y + label_h)
+        elif side == "bottom":
+            line_end = (x, box_y)
+        elif side == "left":
+            line_end = (box_x + label_w, y)
         else:
-            line_end = (box_x, box_y + label_h / 2)
+            line_end = (box_x, y)
 
         box = (box_x, box_y, box_x + label_w, box_y + label_h)
         used_boxes.append(box)
@@ -392,7 +436,7 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
     images = build_i2_hazard_layout_images(data)
     pages = []
 
-    for image_path in images:
+    for image_index, image_path in enumerate(images):
         packet = BytesIO()
         c = canvas.Canvas(
             packet,
@@ -405,11 +449,26 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
             company_name=company_name,
             page_no_text="Page | "
         )
+        if image_index == 0:
+            title = "LOCATION DIAGRAM OF HAZARDOUS MATERIALS"
+            title_font = TABLE_FONT_BOLD
+            title_size = 12
+            title_y = HAZARD_LAYOUT_PAGE_HEIGHT - 92
+            title_w = pdfmetrics.stringWidth(title, title_font, title_size)
 
+            c.setFont(title_font, title_size)
+            c.setFillColor(colors.black)
+            c.drawString((HAZARD_LAYOUT_PAGE_WIDTH - title_w) / 2, title_y, title)
+            c.line(
+                (HAZARD_LAYOUT_PAGE_WIDTH - title_w) / 2,
+                title_y - 2,
+                (HAZARD_LAYOUT_PAGE_WIDTH + title_w) / 2,
+                title_y - 2
+            )
         usable_x = 45
         usable_y = 75
         usable_w = HAZARD_LAYOUT_PAGE_WIDTH - 90
-        usable_h = HAZARD_LAYOUT_PAGE_HEIGHT - 145
+        usable_h = HAZARD_LAYOUT_PAGE_HEIGHT - 180
 
         img = Image.open(image_path)
         img_w, img_h = img.size

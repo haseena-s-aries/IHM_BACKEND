@@ -480,8 +480,11 @@ def main():
             section_pages[key] = display_page_number + 1
 
     revision_next_index = None
-
+    skip_template_pages_after_hazardous = 0
     for page_index, page in enumerate(template_reader.pages):
+        if skip_template_pages_after_hazardous > 0:
+            skip_template_pages_after_hazardous -= 1
+            continue
         page_width = float(page.mediabox.width)
         page_height = float(page.mediabox.height)
 
@@ -512,6 +515,7 @@ def main():
             else:
                 add_page(hazardous_pages, generated_footer=True)
 
+            skip_template_pages_after_hazardous = 3
             continue
         if collection_information_page_index is not None and page_index == collection_information_page_index:
             mark_section("collectionInformation")

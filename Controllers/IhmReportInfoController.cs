@@ -489,6 +489,7 @@ public class IhmReportInfoController : ControllerBase
                 job.AuditPort,
                 job.SiteName,
                 job.StartDate,
+                job.SurveyDate,
                 job.ProjectName
             },
             revisions,
