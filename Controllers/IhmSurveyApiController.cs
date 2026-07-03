@@ -160,14 +160,16 @@ namespace Survey_Certification_App.Controllers
                 ? request.MarkerLabel
                 : await GetMarkerLabelForCheckpointAsync(checkpoint);
 
-            var normalizedImagePath = request.ImagePath.Trim();
+            if (request.XPercent < 0 || request.XPercent > 1 || request.YPercent < 0 || request.YPercent > 1)
+                return BadRequest("Marker coordinates must be normalized values between 0 and 1.");
+
+            var normalizedImagePath = NormalizeMarkerPath(request.ImagePath);
             var marker = request.IhmCheckpointId.HasValue
-                ? await _db.IhmImageMarkers.FirstOrDefaultAsync(x =>
-                    x.SurveyJobId == request.SurveyJobId &&
-                    x.IhmAreaId == request.IhmAreaId &&
-                    x.IhmCheckpointId == request.IhmCheckpointId &&
-                    x.ImagePath == normalizedImagePath)
-                : null;
+    ? await _db.IhmImageMarkers.FirstOrDefaultAsync(x =>
+        x.SurveyJobId == request.SurveyJobId &&
+        x.IhmAreaId == request.IhmAreaId &&
+        x.IhmCheckpointId == request.IhmCheckpointId)
+    : null;
 
             if (marker == null)
             {
@@ -183,6 +185,7 @@ namespace Survey_Certification_App.Controllers
                 _db.IhmImageMarkers.Add(marker);
             }
 
+            marker.ImagePath = normalizedImagePath;
             marker.XPercent = request.XPercent;
             marker.YPercent = request.YPercent;
             marker.MarkerLabel = markerLabel;
@@ -197,8 +200,7 @@ namespace Survey_Certification_App.Controllers
                         x.Id != marker.Id &&
                         x.SurveyJobId == request.SurveyJobId &&
                         x.IhmAreaId == request.IhmAreaId &&
-                        x.IhmCheckpointId == request.IhmCheckpointId &&
-                        x.ImagePath == normalizedImagePath)
+                        x.IhmCheckpointId == request.IhmCheckpointId)
                     .ToListAsync();
 
                 if (duplicateMarkers.Count > 0)
@@ -210,7 +212,137 @@ namespace Survey_Certification_App.Controllers
 
             return Ok(ToMarkerDto(marker));
         }
+        [HttpPost("jobs/{jobId:int}/layouts/auto-map-markers")]
+        public async Task<IActionResult> AutoMapLayoutMarkers(
+    int jobId,
+    [FromBody] AutoMapLayoutMarkersRequest request)
+        {
+            if (request.AreaId <= 0)
+                return BadRequest("AreaId is required.");
 
+            if (string.IsNullOrWhiteSpace(request.ImagePath))
+                return BadRequest("ImagePath is required.");
+
+            var normalizedImagePath = NormalizeMarkerPath(request.ImagePath);
+            var physicalImagePath = ResolveWebPath(normalizedImagePath);
+
+            if (!System.IO.File.Exists(physicalImagePath))
+                return NotFound($"Layout image not found: {normalizedImagePath}");
+
+            var checkpoints = await _db.IhmCheckpoints
+                .Where(x => x.SurveyJobId == jobId && x.IhmAreaId == request.AreaId)
+                .Where(x => !string.IsNullOrWhiteSpace(x.Sample_No))
+                .OrderBy(x => x.SourceRowNumber)
+                .ThenBy(x => x.Sample_No)
+                .ToListAsync();
+
+            if (checkpoints.Count == 0)
+                return BadRequest("No I-2/sample checkpoint records found for this area.");
+
+            var regions = await DetectLayoutMarkerRegionsAsync(physicalImagePath);
+
+            if (regions.Count == 0)
+            {
+                return Ok(new
+                {
+                    mapped = 0,
+                    message = "No marker regions detected. Manual mapping is required.",
+                    regions,
+                    samples = checkpoints.Select(x => new
+                    {
+                        checkpointId = x.Id,
+                        sampleNo = x.Sample_No
+                    })
+                });
+            }
+
+            var expectedByCode = checkpoints
+    .Where(x => !string.IsNullOrWhiteSpace(x.Sample_No))
+    .ToDictionary(
+        x => NormalizeMarkerCode(x.Sample_No!),
+        x => x
+    );
+
+            var matchedRegions = regions
+                .Where(r => !string.IsNullOrWhiteSpace(r.Text))
+                .Select(r => new
+                {
+                    Region = r,
+                    Code = NormalizeMarkerCode(r.Text!)
+                })
+                .Where(x => expectedByCode.ContainsKey(x.Code))
+                .GroupBy(x => x.Code)
+                .Select(g => g.OrderByDescending(x => x.Region.Confidence).First())
+                .ToList();
+
+            if (matchedRegions.Count == 0)
+            {
+                return Ok(new
+                {
+                    mapped = 0,
+                    detected = regions.Count,
+                    expected = checkpoints.Count,
+                    message = "No detected marker text matched I-2 sample/visual numbers.",
+                    regions,
+                    samples = checkpoints.Select(x => new
+                    {
+                        checkpointId = x.Id,
+                        sampleNo = x.Sample_No
+                    }),
+                    needsReview = true
+                });
+            }
+
+            foreach (var matched in matchedRegions)
+            {
+                var checkpoint = expectedByCode[matched.Code];
+                var region = matched.Region;
+
+                var marker = await _db.IhmImageMarkers.FirstOrDefaultAsync(x =>
+                    x.SurveyJobId == jobId &&
+                    x.IhmAreaId == request.AreaId &&
+                    x.IhmCheckpointId == checkpoint.Id);
+
+                if (marker == null)
+                {
+                    marker = new IhmImageMarker
+                    {
+                        SurveyJobId = jobId,
+                        IhmAreaId = request.AreaId,
+                        IhmCheckpointId = checkpoint.Id,
+                        CreatedByUserId = request.UserId ?? GetCurrentUserId() ?? 0,
+                        CreatedAt = DateTime.UtcNow
+                    };
+
+                    _db.IhmImageMarkers.Add(marker);
+                }
+
+                marker.ImagePath = normalizedImagePath;
+                marker.MarkerLabel = checkpoint.Sample_No;
+                marker.XPercent = Math.Clamp(region.XPercent, 0, 1);
+                marker.YPercent = Math.Clamp(region.YPercent, 0, 1);
+            }
+
+            await _db.SaveChangesAsync();
+
+            var savedMarkers = await _db.IhmImageMarkers
+                .Where(x =>
+                    x.SurveyJobId == jobId &&
+                    x.IhmAreaId == request.AreaId &&
+                    x.ImagePath == normalizedImagePath)
+                .Select(x => ToMarkerDto(x))
+                .ToListAsync();
+
+            return Ok(new
+            {
+                mapped = matchedRegions.Count,
+                detected = regions.Count,
+                expected = checkpoints.Count,
+                markers = savedMarkers,
+                message = $"{matchedRegions.Count} marker text(s) matched and mapped.",
+                needsReview = matchedRegions.Count != checkpoints.Count
+            });
+        }
 
         [HttpGet("jobs/{jobId:int}/markers")]
         public async Task<IActionResult> GetMarkers(int jobId)
@@ -307,7 +439,103 @@ namespace Survey_Certification_App.Controllers
             if (changed)
                 await _db.SaveChangesAsync();
         }
+        private static string NormalizeMarkerCode(string value)
+        {
+            var text = (value ?? string.Empty)
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "")
+                .Replace("_", "")
+                .Replace("-", "");
 
+            text = text.Replace("O", "0");
+
+            if (text.Length >= 2 && (text[0] == 'S' || text[0] == 'V'))
+            {
+                var digits = new string(text.Skip(1).Where(char.IsDigit).ToArray());
+
+                if (int.TryParse(digits, out var number))
+                    return $"{text[0]}{number:00}";
+            }
+
+            return text;
+        }
+        private static string NormalizeMarkerPath(string path)
+        {
+            return (path ?? string.Empty)
+                .Trim()
+                .Replace("\\", "/")
+                .TrimStart('/')
+                .ToLowerInvariant();
+        }
+
+        private string ResolveWebPath(string webPath)
+        {
+            var cleanPath = (webPath ?? string.Empty)
+                .Replace("\\", "/")
+                .TrimStart('/');
+
+            return Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "wwwroot",
+                cleanPath.Replace("/", Path.DirectorySeparatorChar.ToString())
+            );
+        }
+
+        private async Task<List<DetectedLayoutMarkerRegionDto>> DetectLayoutMarkerRegionsAsync(string physicalImagePath)
+        {
+            var scriptPath = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "PythonServices",
+                "detect_layout_marker_regions.py"
+            );
+
+            if (!System.IO.File.Exists(scriptPath))
+                return new List<DetectedLayoutMarkerRegionDto>();
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "python",
+                Arguments = $"\"{scriptPath}\" \"{physicalImagePath}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(startInfo);
+            if (process == null)
+                return new List<DetectedLayoutMarkerRegionDto>();
+
+            var output = await process.StandardOutput.ReadToEndAsync();
+            var error = await process.StandardError.ReadToEndAsync();
+            var completed = await Task.Run(() => process.WaitForExit(30000));
+            if (!completed)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                Console.WriteLine("[IHM] marker region detection timed out.");
+                return new List<DetectedLayoutMarkerRegionDto>();
+            }
+
+            if (process.ExitCode != 0)
+            {
+                Console.WriteLine("[IHM] marker region detection failed: " + error);
+                return new List<DetectedLayoutMarkerRegionDto>();
+            }
+
+            try
+            {
+                return JsonSerializer.Deserialize<List<DetectedLayoutMarkerRegionDto>>(
+                    output,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+                ) ?? new List<DetectedLayoutMarkerRegionDto>();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[IHM] marker region detection parse failed: " + ex.Message);
+                return new List<DetectedLayoutMarkerRegionDto>();
+            }
+        }
         private static string? GetMarkerType(IhmCheckpoint checkpoint) =>
             GetMarkerType(checkpoint.SamplingCheck, checkpoint.VisualCheck);
 
@@ -720,7 +948,10 @@ namespace Survey_Certification_App.Controllers
 
                             Result = cp.Result.ToString(),
                             cp.Remarks,
+                            cp.IsPchm,
+                            cp.LocationRemarks,
                             cp.SourceRowNumber
+                           
                         })
                         .ToList()
                 })
@@ -863,11 +1094,11 @@ namespace Survey_Certification_App.Controllers
             if (file == null || file.Length == 0)
                 return BadRequest("Layout file is required.");
 
-            var allowedExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
+            var allowedExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp", ".pdf" };
             var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
 
             if (!allowedExtensions.Contains(extension))
-                return BadRequest("Only image files are allowed.");
+                return BadRequest("Only image or PDF files are allowed.");
 
             var uploadFolder = Path.Combine(
                 Directory.GetCurrentDirectory(),
@@ -880,12 +1111,33 @@ namespace Survey_Certification_App.Controllers
 
             Directory.CreateDirectory(uploadFolder);
 
-            var storedFileName = $"{Guid.NewGuid()}.jpg";
+            var isPdf = extension == ".pdf";
+            var baseName = Guid.NewGuid().ToString();
+            var storedFileName = isPdf ? $"{baseName}.pdf" : $"{baseName}.jpg";
             var physicalPath = Path.Combine(uploadFolder, storedFileName);
 
-            await SaveCompressedPhotoAsync(file, physicalPath);
+            string markerFileName;
+            string markerPhysicalPath;
 
-            var filePath = $"/uploads/ihm-area-layouts/{jobId}/{areaId}/{storedFileName}";
+            if (isPdf)
+            {
+                await using (var stream = new FileStream(physicalPath, FileMode.Create))
+                {
+                    await file.CopyToAsync(stream);
+                }
+
+                markerFileName = $"{baseName}.jpg";
+                markerPhysicalPath = Path.Combine(uploadFolder, markerFileName);
+                await ConvertPdfFirstPageToImageAsync(physicalPath, markerPhysicalPath);
+            }
+            else
+            {
+                await SaveCompressedPhotoAsync(file, physicalPath);
+                markerFileName = storedFileName;
+                markerPhysicalPath = physicalPath;
+            }
+
+            var filePath = $"/uploads/ihm-area-layouts/{jobId}/{areaId}/{markerFileName}";
 
             var existingLayout = await _db.IhmSamplingPhotos
                 .Where(x => x.SurveyJobId == jobId &&
@@ -1054,11 +1306,11 @@ namespace Survey_Certification_App.Controllers
             if (file == null || file.Length == 0)
                 return BadRequest("GA layout file is required.");
 
-            var allowedExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
+            var allowedExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp", ".pdf" };
             var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
 
             if (!allowedExtensions.Contains(extension))
-                return BadRequest("Only image files are allowed.");
+                return BadRequest("Only image or PDF files are allowed.");
 
             var uploadFolder = Path.Combine(
                 Directory.GetCurrentDirectory(),
@@ -1070,7 +1322,9 @@ namespace Survey_Certification_App.Controllers
 
             Directory.CreateDirectory(uploadFolder);
 
-            var storedFileName = $"{Guid.NewGuid()}{extension}";
+            var isPdf = extension == ".pdf";
+            var baseName = Guid.NewGuid().ToString();
+            var storedFileName = isPdf ? $"{baseName}.pdf" : $"{baseName}{extension}";
             var physicalPath = Path.Combine(uploadFolder, storedFileName);
 
             await using (var stream = new FileStream(physicalPath, FileMode.Create))
@@ -1078,7 +1332,16 @@ namespace Survey_Certification_App.Controllers
                 await file.CopyToAsync(stream);
             }
 
-            var filePath = $"/uploads/ihm-ga-layouts/{jobId}/{storedFileName}";
+            string markerFileName = storedFileName;
+
+            if (isPdf)
+            {
+                markerFileName = $"{baseName}.jpg";
+                var markerPhysicalPath = Path.Combine(uploadFolder, markerFileName);
+                await ConvertPdfFirstPageToImageAsync(physicalPath, markerPhysicalPath);
+            }
+
+            var filePath = $"/uploads/ihm-ga-layouts/{jobId}/{markerFileName}";
 
             var existingGa = await _db.IhmSamplingPhotos
                 .Where(x => x.SurveyJobId == jobId &&
@@ -1103,7 +1366,7 @@ namespace Survey_Certification_App.Controllers
             existingGa.OriginalFileName = file.FileName;
             existingGa.StoredFileName = storedFileName;
             existingGa.FilePath = filePath;
-            existingGa.ContentType = file.ContentType;
+            existingGa.ContentType = "image/jpeg";
             existingGa.UploadedByUserId = uploadedByUserId ?? GetCurrentUserId() ?? 0;
             existingGa.UploadedAt = DateTime.UtcNow;
 
@@ -1949,6 +2212,34 @@ namespace Survey_Certification_App.Controllers
 
             return PhysicalFile(pdfPath, "application/pdf", $"ihm-report-{jobId}.pdf");
         }
+        private async Task ConvertPdfFirstPageToImageAsync(string pdfPath, string outputImagePath)
+        {
+            var scriptPath = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "PythonServices",
+                "pdf_first_page_to_image.py"
+            );
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "python",
+                Arguments = $"\"{scriptPath}\" \"{pdfPath}\" \"{outputImagePath}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process == null)
+                throw new InvalidOperationException("Unable to start PDF converter.");
+
+            var error = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException("PDF to image conversion failed: " + error);
+        }
         private static Task SaveCompressedPhotoAsync(
   IFormFile file,
   string outputPath)
@@ -2280,7 +2571,22 @@ namespace Survey_Certification_App.Controllers
         public string? Remarks { get; set; }
         public int? UpdatedByUserId { get; set; }
     }
+    public class AutoMapLayoutMarkersRequest
+    {
+        public int AreaId { get; set; }
+        public string ImagePath { get; set; } = string.Empty;
+        public int? UserId { get; set; }
+    }
 
+    public class DetectedLayoutMarkerRegionDto
+    {
+        public decimal XPercent { get; set; }
+        public decimal YPercent { get; set; }
+        public decimal WidthPercent { get; set; }
+        public decimal HeightPercent { get; set; }
+        public decimal Confidence { get; set; }
+        public string? Text { get; set; }
+    }
     public class CreateIhmMarkerRequest
     {
         public int SurveyJobId { get; set; }

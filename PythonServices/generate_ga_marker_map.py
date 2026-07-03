@@ -173,7 +173,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
     layout_right = layout_x + layout_w
     layout_bottom = layout_y + layout_h
 
-    groups = group_markers(marker_points, tolerance=8)
+    groups = group_markers(marker_points, tolerance=28)
 
     label_h = 28
     gap = 12
@@ -246,10 +246,24 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
         return len(lanes[side]) - 1
 
     placements = []
+    used_boxes = []
+
+    def boxes_overlap(a, b):
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        return not (
+            ax2 + gap < bx1 or
+            ax1 - gap > bx2 or
+            ay2 + gap < by1 or
+            ay1 - gap > by2
+        )
+
+    def has_overlap(box):
+        return any(boxes_overlap(box, old_box) for old_box in used_boxes)
 
     for side, items in side_groups.items():
         for group in items:
-            label = ",".join(group["labels"])
+            label = ", ".join(group["labels"])
             text_w, text_h = text_size(draw, label, font)
             label_w = max(58, text_w + 16)
 
@@ -263,6 +277,8 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
                 route = (group["x"], line_end[1] + (line_gap / 2))
 
             elif side == "bottom":
+     
+
                 box_x = group["x"] - label_w / 2
                 box_x = max(margin, min(box_x, canvas_w - label_w - margin))
                 lane = reserve_horizontal_lane(side, box_x, box_x + label_w)
@@ -271,6 +287,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
                 line_end = (box_x + label_w / 2, box_y)
                 route = (group["x"], line_end[1] - (line_gap / 2))
 
+                
             elif side == "left":
                 box_y = group["y"] - label_h / 2
                 box_y = max(margin, min(box_y, canvas_h - label_h - margin))
@@ -289,11 +306,63 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
                 line_end = (box_x, box_y + label_h / 2)
                 route = (line_end[0] - (line_gap / 2), group["y"])
 
+            box = (box_x, box_y, box_x + label_w, box_y + label_h)
+
+            if has_overlap(box):
+                alternate_sides = ["top", "bottom", "left", "right"]
+
+                for alt_side in alternate_sides:
+                    if alt_side == side:
+                        continue
+
+                    if alt_side == "top":
+                        test_x = group["x"] - label_w / 2
+                        test_x = max(margin, min(test_x, canvas_w - label_w - margin))
+                        test_y = layout_y - line_gap - label_h
+                        test_y = max(margin, test_y)
+                        test_line_end = (test_x + label_w / 2, test_y + label_h)
+                        test_route = (group["x"], test_line_end[1] + (line_gap / 2))
+
+                    elif alt_side == "bottom":
+                        test_x = group["x"] - label_w / 2
+                        test_x = max(margin, min(test_x, canvas_w - label_w - margin))
+                        test_y = layout_bottom + line_gap
+                        test_y = min(test_y, canvas_h - label_h - margin)
+                        test_line_end = (test_x + label_w / 2, test_y)
+                        test_route = (group["x"], test_line_end[1] - (line_gap / 2))
+
+                    elif alt_side == "left":
+                        test_y = group["y"] - label_h / 2
+                        test_y = max(margin, min(test_y, canvas_h - label_h - margin))
+                        test_x = layout_x - line_gap - label_w
+                        test_x = max(margin, test_x)
+                        test_line_end = (test_x + label_w, test_y + label_h / 2)
+                        test_route = (test_line_end[0] + (line_gap / 2), group["y"])
+
+                    else:
+                        test_y = group["y"] - label_h / 2
+                        test_y = max(margin, min(test_y, canvas_h - label_h - margin))
+                        test_x = layout_right + line_gap
+                        test_x = min(test_x, canvas_w - label_w - margin)
+                        test_line_end = (test_x, test_y + label_h / 2)
+                        test_route = (test_line_end[0] - (line_gap / 2), group["y"])
+
+                    test_box = (test_x, test_y, test_x + label_w, test_y + label_h)
+
+                    if not has_overlap(test_box):
+                        box_x = test_x
+                        box_y = test_y
+                        line_end = test_line_end
+                        route = test_route
+                        box = test_box
+                        break
+
+            used_boxes.append(box)
             placements.append({
                 "group": group,
                 "label": label,
                 "text_h": text_h,
-                "box": (box_x, box_y, box_x + label_w, box_y + label_h),
+                "box": box,
                 "line_end": line_end,
                 "route": route,
             })
@@ -306,7 +375,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
         end_x, end_y = item["line_end"]
 
         draw.line(
-            [group["x"], group["y"], route_x, route_y, end_x, end_y],
+            [group.get("draw_x", group["x"]), group.get("draw_y", group["y"]), route_x, route_y, end_x, end_y],
             fill=blue,
             width=2,
         )
@@ -314,10 +383,10 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
         dot_radius = 4
         draw.ellipse(
             [
-                group["x"] - dot_radius,
-                group["y"] - dot_radius,
-                group["x"] + dot_radius,
-                group["y"] + dot_radius,
+                group.get("draw_x", group["x"]) - dot_radius,
+                group.get("draw_y", group["y"]) - dot_radius,
+                group.get("draw_x", group["x"]) + dot_radius,
+                group.get("draw_y", group["y"]) + dot_radius,
             ],
             outline=blue,
             fill=white,
@@ -337,7 +406,16 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size):
             fill=blue,
             font=font,
         )
+def percent_to_unit(value):
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
+    if number > 1:
+        number = number / 100.0
+
+    return max(0.0, min(number, 1.0))
 def marker_points_for_image(markers, image_width, image_height, outer_pad, y_offset=0):
     points = []
 
@@ -346,8 +424,8 @@ def marker_points_for_image(markers, image_width, image_height, outer_pad, y_off
         if not label:
             continue
 
-        x = outer_pad + (float(marker.get("xPercent") or 0) / 100) * image_width
-        y = outer_pad + (float(marker.get("yPercent") or 0) / 100) * image_height + y_offset
+        x = outer_pad + percent_to_unit(marker.get("xPercent")) * image_width
+        y = outer_pad + percent_to_unit(marker.get("yPercent")) * image_height + y_offset
 
         y = max(outer_pad, min(y, outer_pad + image_height))
 
@@ -465,9 +543,9 @@ def main():
         common_markers,
         ga_w,
         ga_h,
-        outer_pad,
-        y_offset=65
+        outer_pad
     )
+    
     generated_layouts = [{
         "kind": "common",
         "title": "COMMON LAYOUT - MARKED CHECKPOINTS",

@@ -2,9 +2,13 @@ from io import BytesIO
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
-
+import re
 from pypdf import PdfReader
 from PIL import Image, ImageDraw, ImageFont
+import cv2
+import numpy as np
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.pdfbase import pdfmetrics
@@ -136,12 +140,269 @@ def marker_label(marker):
 def marker_image_path(marker):
     return first_value(marker, "imagePath", "ImagePath")
 
+def normalize_sample_label(value):
+    return (
+        str(value or "")
+        .strip()
+        .upper()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
+    )
+
+
+def get_ga_layout_source(data):
+    ga_layout_source = (
+        data.get("gaLayout")
+        or data.get("GaLayout")
+        or data.get("gaLayoutPhysicalPath")
+        or data.get("GaLayoutPhysicalPath")
+    )
+
+    if isinstance(ga_layout_source, dict):
+        ga_layout_source = (
+            ga_layout_source.get("filePath")
+            or ga_layout_source.get("FilePath")
+        )
+
+    return ga_layout_source
+_SAMPLE_LABEL_RE = re.compile(r"^[SV]\d{1,3}$", re.IGNORECASE)
+
+
+def detect_existing_sample_text_markings(image_path, expected_labels=None):
+    expected = {
+        normalize_sample_label(label)
+        for label in (expected_labels or [])
+        if normalize_sample_label(label)
+    }
+
+    image = Image.open(image_path).convert("RGB")
+    image_w, image_h = image.size
+    detected = {}
+
+    variants = []
+
+    variants.append(image)
+
+    gray = image.convert("L")
+    variants.append(gray.convert("RGB"))
+
+    for variant in variants:
+        for scale in (3,):
+            enlarged = variant.resize((image_w * scale, image_h * scale))
+
+            for psm in (6,):
+                data = pytesseract.image_to_data(
+                    enlarged,
+                    config=(
+                        f"--psm {psm} "
+                        "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_ "
+                        "-c preserve_interword_spaces=1"
+                    ),
+                    output_type=pytesseract.Output.DICT,
+                    timeout=8,
+                )
+
+                words = []
+                for i, raw_text in enumerate(data.get("text", [])):
+                    text = str(raw_text or "").strip()
+                    if not text:
+                        continue
+
+                    words.append({
+                        "text": text,
+                        "label": normalize_sample_label(text),
+                        "x": data["left"][i] / scale,
+                        "y": data["top"][i] / scale,
+                        "w": data["width"][i] / scale,
+                        "h": data["height"][i] / scale,
+                    })
+
+                for i in range(len(words)):
+                    for take in (1, 2, 3):
+                        chunk = words[i:i + take]
+                        if len(chunk) != take:
+                            continue
+
+                        joined = "".join(item["text"] for item in chunk)
+                        label = normalize_sample_label(joined)
+
+                        if expected and label not in expected:
+                            continue
+
+                        if not _SAMPLE_LABEL_RE.search(label):
+                            continue
+
+                        x1 = min(item["x"] for item in chunk)
+                        y1 = min(item["y"] for item in chunk)
+                        x2 = max(item["x"] + item["w"] for item in chunk)
+                        y2 = max(item["y"] + item["h"] for item in chunk)
+
+                        detected[label] = {
+                            "label": label,
+                            "xPercent": ((x1 + x2) / 2) / image_w,
+                            "yPercent": ((y1 + y2) / 2) / image_h,
+                            "source": "existing-image",
+                        }
+
+    return list(detected.values())
+
+
+def detect_all_existing_sample_markings(image_path, expected_labels=None):
+    by_label = {}
+
+    for item in detect_existing_blue_sample_markings(image_path):
+        label = normalize_sample_label(item.get("label"))
+        if label:
+            by_label[label] = item
+
+    for item in detect_existing_sample_text_markings(image_path, expected_labels):
+        label = normalize_sample_label(item.get("label"))
+        if label:
+            by_label[label] = item
+
+    return list(by_label.values())
+
+
+def collect_layout_sources_for_hazard_detection(data):
+    sources = []
+
+    def add_source(value):
+        if isinstance(value, dict):
+            value = value.get("filePath") or value.get("FilePath")
+        value = str(value or "").strip()
+        if not value:
+            return
+
+        normalized = normalize_web_path(value)
+        existing = {normalize_web_path(item) for item in sources}
+        if normalized not in existing:
+            sources.append(value)
+
+    add_source(get_ga_layout_source(data))
+    add_source(data.get("latestAreaLayout") or data.get("LatestAreaLayout"))
+
+    for layout in data.get("areaLayouts") or data.get("AreaLayouts") or []:
+        add_source(layout)
+
+    job_id = (data.get("job") or data.get("Job") or {}).get("id") or (data.get("job") or data.get("Job") or {}).get("Id")
+    if job_id:
+        report_folder = Path.cwd() / "wwwroot" / "reports" / "ihm" / str(job_id)
+        add_source(str(report_folder / "appendix4-ga-marker-map.png"))
+
+        for image_path in sorted(report_folder.glob("appendix4-area-*.png")):
+            add_source(str(image_path))
+
+    return sources
+
+def detect_existing_blue_sample_markings(image_path):
+    image = Image.open(image_path).convert("RGB")
+    arr = np.array(image)
+
+    red = arr[:, :, 0]
+    green = arr[:, :, 1]
+    blue = arr[:, :, 2]
+
+    blue_mask = (
+        (blue > 110) &
+        (red < 170) &
+        (green < 190) &
+        ((blue - red) > 25) &
+        ((blue - green) > 15)
+    )
+
+    red_mask = (
+            (red > 140) &
+            (green < 140) &
+            (blue < 140) &
+            ((red - green) > 35) &
+            ((red - blue) > 35)
+        )
+
+    dark_text_mask = (
+            (red < 80) &
+            (green < 80) &
+            (blue < 80)
+        )
+
+    mask = (blue_mask | red_mask | dark_text_mask).astype(np.uint8) * 255
+
+    # Connect blue text/box/line/dot into one marking region.
+    kernel = np.ones((9, 9), np.uint8)
+    connected = cv2.dilate(mask, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(
+        connected,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    image_h, image_w = arr.shape[:2]
+    detected = []
+
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+
+        if w < 25 or h < 15:
+            continue
+
+        # Ignore very large accidental regions.
+        if w > image_w * 0.45 or h > image_h * 0.45:
+            continue
+
+        pad = 8
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(image_w, x + w + pad)
+        y2 = min(image_h, y + h + pad)
+
+        crop = image.crop((x1, y1, x2, y2))
+
+        crop = crop.resize((crop.width * 4, crop.height * 4))
+
+        text = ""
+
+        for psm in (6, 7, 11):
+            text += "\n" + pytesseract.image_to_string(
+                crop,
+                config=(
+                    f"--psm {psm} "
+                    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789,-_"
+                )
+            )
+
+        labels = []
+
+        for part in re.split(r"[\s,;/|]+", text.replace("\n", " ")):
+            label = normalize_sample_label(part)
+            if _SAMPLE_LABEL_RE.search(label):
+                labels.append(label)
+
+        for label in labels:
+            # For vertical callouts, point is usually at the image-side end.
+            center_x = x + (w / 2)
+
+            if y < image_h * 0.25:
+                point_y = y + h
+            elif y > image_h * 0.60:
+                point_y = y
+            else:
+                point_y = y + (h / 2)
+
+            detected.append({
+                "label": label,
+                "xPercent": center_x / image_w,
+                "yPercent": point_y / image_h,
+                "source": "existing-image",
+            })
+
+    return detected
 
 def dedupe_latest_markers(markers):
     latest = {}
 
     for marker in markers:
-        label = marker_label(marker).upper()
+        label = normalize_sample_label(marker_label(marker))
         image_path = normalize_web_path(marker_image_path(marker))
         if not label or not image_path:
             continue
@@ -179,10 +440,39 @@ def wrap_pil_text(draw, text, font, max_width):
         lines.append(current)
 
     return lines or [""]
+def erase_existing_blue_markings(image):
+    arr = np.array(image.convert("RGB"))
 
+    red = arr[:, :, 0]
+    green = arr[:, :, 1]
+    blue = arr[:, :, 2]
 
-def draw_hazard_marked_layout_image(source_path, marker_items, output_path):
+    mask = (
+    (blue > 105) &
+    (red < 150) &
+    (green < 170) &
+    ((blue - red) > 30) &
+    ((blue - green) > 15)
+    ).astype(np.uint8) * 255
+
+    kernel = np.ones((2, 2), np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+
+    cleaned = cv2.inpaint(arr, mask, 2, cv2.INPAINT_TELEA)
+    return Image.fromarray(cleaned)
+def percent_to_unit(value):
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if number > 1:
+        number = number / 100.0
+
+    return max(0.0, min(number, 1.0))
+def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bottom_dot_offset=0):
     base = Image.open(source_path).convert("RGB")
+    base = erase_existing_blue_markings(base)
     image_w, image_h = base.size
 
     outer_pad = 220
@@ -219,8 +509,8 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path):
         marker = item["marker"]
         label = item["label"]
 
-        x = outer_pad + (float(marker.get("xPercent") or marker.get("XPercent") or 0) / 100) * image_w
-        y = outer_pad + (float(marker.get("yPercent") or marker.get("YPercent") or 0) / 100) * image_h
+        x = outer_pad + percent_to_unit(marker.get("xPercent") or marker.get("XPercent")) * image_w
+        y = outer_pad + percent_to_unit(marker.get("yPercent") or marker.get("YPercent")) * image_h
 
 
         max_label_w = 210
@@ -324,21 +614,25 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path):
             if not moved:
                 break
 
+        draw_x = x
+        draw_y = y
+
         if side == "top":
             line_end = (x, box_y + label_h)
         elif side == "bottom":
             line_end = (x, box_y)
         elif side == "left":
+            draw_y = y
             line_end = (box_x + label_w, y)
         else:
+            draw_y = y
             line_end = (box_x, y)
-
         box = (box_x, box_y, box_x + label_w, box_y + label_h)
         used_boxes.append(box)
 
         placements.append({
-            "x": x,
-            "y": y,
+            "x": draw_x,
+            "y": draw_y,
             "box": box,
             "line_end": line_end,
             "lines": lines,
@@ -380,17 +674,18 @@ def build_i2_hazard_layout_images(data):
     markers_by_label = {}
 
     for marker in markers:
-        label = marker_label(marker).upper()
+        label = normalize_sample_label(marker_label(marker))
         if label:
             markers_by_label.setdefault(label, []).append(marker)
 
     grouped_by_image = {}
+    i2_rows_by_sample_no = {}
 
     for row in equipment_rows:
-        sample_no = equipment_sample_no(row).upper()
+        sample_no = normalize_sample_label(equipment_sample_no(row))
         if not sample_no:
             continue
-
+        i2_rows_by_sample_no[sample_no] = row
         row_markers = markers_by_label.get(sample_no) or []
         if not row_markers:
             continue
@@ -412,6 +707,95 @@ def build_i2_hazard_layout_images(data):
                 "marker": marker,
                 "label": label,
             })
+    ga_layout_source = get_ga_layout_source(data)
+    ga_layout_path = resolve_report_image_path(ga_layout_source)
+    normalized_ga_source = normalize_web_path(ga_layout_source)
+    layout_sources_for_ocr = collect_layout_sources_for_hazard_detection(data)
+
+    db_common_marker_sample_nos = set()
+    for marker in markers:
+        marker_sample = normalize_sample_label(marker_label(marker))
+        marker_image = normalize_web_path(marker_image_path(marker))
+
+        if marker_sample and marker_image == normalized_ga_source:
+            db_common_marker_sample_nos.add(marker_sample)
+
+    missing_sample_nos = [
+        sample_no
+        for sample_no in i2_rows_by_sample_no
+        if sample_no not in db_common_marker_sample_nos
+    ]
+
+    if missing_sample_nos:
+        found_existing_sample_nos = set()
+
+        for layout_source in layout_sources_for_ocr:
+            layout_path = resolve_report_image_path(layout_source)
+            if not layout_path or not layout_path.exists():
+                continue
+
+            normalized_layout_source = normalize_web_path(layout_source)
+            ocr_markings = detect_all_existing_sample_markings(
+                layout_path,
+                expected_labels=missing_sample_nos
+            )
+            print(
+                f"Hazard OCR source: {layout_path} detected: "
+                + ", ".join(sorted(normalize_sample_label(x.get("label")) for x in ocr_markings)),
+                file=sys.stderr
+            )
+            ocr_by_label = {
+                normalize_sample_label(item["label"]): item
+                for item in ocr_markings
+            }
+
+            for sample_no in missing_sample_nos:
+                if sample_no in found_existing_sample_nos:
+                    continue
+
+                ocr_item = ocr_by_label.get(sample_no)
+                if not ocr_item:
+                    continue
+
+                row = i2_rows_by_sample_no[sample_no]
+                label = hazard_marker_label(row)
+
+                grouped_by_image.setdefault(normalized_layout_source, {
+                    "source": layout_source,
+                    "items": []
+                })
+
+                grouped_by_image[normalized_layout_source]["items"].append({
+                    "marker": {
+                        "markerLabel": sample_no,
+                        "imagePath": layout_source,
+                        "xPercent": ocr_item["xPercent"],
+                        "yPercent": ocr_item["yPercent"],
+                        "source": "existing-image",
+                    },
+                    "label": label,
+                })
+
+                found_existing_sample_nos.add(sample_no)
+
+        skipped = [
+            sample_no
+            for sample_no in missing_sample_nos
+            if sample_no not in found_existing_sample_nos
+        ]
+
+        if skipped:
+            message = (
+                "I-2 hazard layout skipped samples without marker position: "
+                + ", ".join(skipped)
+            )
+
+            print(message, file=sys.stderr)
+
+            log_path = Path.cwd() / "wwwroot" / "reports" / "ihm" / "hazard-ocr-log.txt"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            old_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+            log_path.write_text(old_log + "\n" + message, encoding="utf-8")
 
     generated = []
     print(f"I-2 hazard layout image groups: {len(grouped_by_image)}", file=sys.stderr)
@@ -422,11 +806,29 @@ def build_i2_hazard_layout_images(data):
         if not source_path or not source_path.exists():
             continue
 
+        ga_layout_source = (
+            data.get("gaLayout")
+            or data.get("GaLayout")
+        )
+
+        if isinstance(ga_layout_source, dict):
+            ga_layout_source = (
+                ga_layout_source.get("filePath")
+                or ga_layout_source.get("FilePath")
+            )
+
+        current_source = normalize_web_path(group["source"])
+        common_source = normalize_web_path(ga_layout_source)
+
+        bottom_dot_offset = 0
+
         output_path = output_dir / f"i2-hazard-layout-{index}.png"
+
         generated.append(draw_hazard_marked_layout_image(
             source_path,
             group["items"],
-            output_path
+            output_path,
+            bottom_dot_offset=bottom_dot_offset
         ))
 
     return generated
