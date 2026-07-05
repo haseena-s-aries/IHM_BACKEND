@@ -5,173 +5,165 @@ import numpy as np
 import os
 import re
 
+def normalize_label(value):
+    text = str(value or "").upper().strip()
+    text = text.replace(" ", "").replace("_", "").replace("-", "")
+    text = text.replace("O", "0")
+    return text
+
 def detect_regions(image_path):
     img = cv2.imread(image_path)
     if img is None:
         return []
 
     original_h, original_w = img.shape[:2]
+    detected = {}
+    DEBUG_FILE = r"E:\ARIES_PROJECTS\AurasApp_Apis\AurasApp_Apis\AurasApp_Apis\wwwroot\reports\ihm\ocr_debug.txt"
 
-    # Enlarge strongly because layout marker text is usually tiny.
-    scale = 3
-    big = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    def debug_log(message):
+        try:
+            os.makedirs(os.path.dirname(DEBUG_FILE), exist_ok=True)
+            with open(DEBUG_FILE, "a", encoding="utf-8") as f:
+                f.write(str(message) + "\n")
+        except Exception:
+            pass
 
-    gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+    debug_log("\n===================================")
+    debug_log(f"IMAGE_PATH={image_path}")
+    debug_log(f"IMAGE_SIZE={original_w}x{original_h}")
 
-    # Improve local contrast.
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
+    try:
+        import pytesseract
 
-    candidates = []
+        tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(tesseract_path):
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
-    def add_candidates(mask, source_name):
-        # Join characters like S01 / V01 into one blob.
-        kernels = [
-            cv2.getStructuringElement(cv2.MORPH_RECT, (11, 3)),
-            cv2.getStructuringElement(cv2.MORPH_RECT, (15, 5)),
-            cv2.getStructuringElement(cv2.MORPH_RECT, (21, 7)),
-        ]
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        debug_log("Image loaded and HSV converted")
+        blue_mask = cv2.inRange(
+            hsv,
+            np.array([85, 35, 40]),
+            np.array([140, 255, 255])
+        )
+        debug_log(f"BLUE_PIXELS={cv2.countNonZero(blue_mask)}")
+        # Remove long blue connector lines so only label boxes/text remain.
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 45))
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (45, 1))
 
-        for kernel in kernels:
-            joined = cv2.dilate(mask, kernel, iterations=1)
-            contours, _ = cv2.findContours(
-                joined,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
-            )
+        vertical_lines = cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN, vertical_kernel)
+        horizontal_lines = cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN, horizontal_kernel)
 
-            for c in contours:
-                x, y, w, h = cv2.boundingRect(c)
+        line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
+        label_mask = cv2.subtract(blue_mask, line_mask)
 
-                ox = x / scale
-                oy = y / scale
-                ow = w / scale
-                oh = h / scale
+        # Reconnect label box/text pieces.
+        join_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2))
+        label_mask = cv2.dilate(label_mask, join_kernel, iterations=1)
 
-                # Less strict than before. Old marker text can be small or boxed.
-                if ow < 5 or oh < 4:
-                    continue
-                if ow > original_w * 0.18 or oh > original_h * 0.10:
-                    continue
+        contours, _ = cv2.findContours(
+            label_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        debug_log(f"CONTOURS_FOUND={len(contours)}")
+        boxes = []
 
-                aspect = ow / max(oh, 1)
-                if aspect < 0.25 or aspect > 12:
-                    continue
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
 
-                area = ow * oh
-                if area < 25:
-                    continue
+            # Keep small blue label rectangles, ignore long connector lines.
+            if w < 25 or h < 12:
+                continue
+            if w > 300 or h > 100:
+                continue
 
-                crop = img[
-                    max(0, int(oy) - 8):min(original_h, int(oy + oh) + 8),
-                    max(0, int(ox) - 8):min(original_w, int(ox + ow) + 8)
-                ]
+            aspect = w / max(h, 1)
+            if aspect < 1.2 or aspect > 5.5:
+                continue
 
-                text = ""
-                try:
-                    import pytesseract
-                    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-                    if os.path.exists(tesseract_path):
-                        pytesseract.pytesseract.tesseract_cmd = tesseract_path
-                    crop_big = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
-                    crop_gray = cv2.cvtColor(crop_big, cv2.COLOR_BGR2GRAY)
-                    crop_gray = cv2.GaussianBlur(crop_gray, (3, 3), 0)
-                    crop_gray = cv2.threshold(
+            boxes.append((x, y, w, h))
+            debug_log(f"BOX_ACCEPTED x={x}, y={y}, w={w}, h={h}, aspect={aspect}")
+        for x, y, w, h in boxes:
+            # Crop inside the blue box border, not the connector line.
+            pad = 10
+            crop = img[
+                max(0, y - pad):min(original_h, y + h + pad),
+                max(0, x - pad):min(original_w, x + w + pad)
+            ]
+
+            if crop.size == 0:
+                continue
+
+            crop_big = cv2.resize(crop, None, fx=8, fy=8, interpolation=cv2.INTER_CUBIC)
+            crop_gray = cv2.cvtColor(crop_big, cv2.COLOR_BGR2GRAY)
+
+            crop_gray = cv2.GaussianBlur(crop_gray, (3, 3), 0)
+            crop_gray = cv2.threshold(
+                crop_gray,
+                0,
+                255,
+                cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )[1]
+
+            psm_groups = [[7, 8], [6, 11, 13]]
+            found = False
+
+            for psm_group in psm_groups:
+                if found:
+                    break
+
+                for psm in psm_group:
+                    raw = pytesseract.image_to_string(
                         crop_gray,
-                        0,
-                        255,
-                        cv2.THRESH_BINARY + cv2.THRESH_OTSU
-                    )[1]
+                        config=(
+                            f"--psm {psm} --oem 3 "
+                            "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 "
+                        ),
+                        timeout=3
+                    )
 
-                    if np.mean(crop_gray) < 127:
-                        crop_gray = cv2.bitwise_not(crop_gray)
+                    label = normalize_label(raw)
+                    debug_log(f"BOX x={x}, y={y}, w={w}, h={h}, PSM={psm}, RAW={raw.strip()}, LABEL={label}")
+                    matches = re.findall(r"[SV]\d{1,2}", label)
+                    if not matches:
+                        continue
 
-                    ocr_results = []
+                    for m in matches:
+                        text = normalize_label(m)
 
-                    for psm in [7, 8]:
-                        raw = pytesseract.image_to_string(
-                            crop_gray,
-                            config=f"--psm {psm} --oem 3 -c tessedit_char_whitelist=SVvOo0123456789-_",
-                            timeout=3
-                        )
-                        cleaned = raw.strip().upper().replace(" ", "").replace("\n", "").replace("_", "").replace("-", "")
-                        cleaned = cleaned.replace("O", "0")
+                        # Convert V2 -> V02, S1 -> S01
+                        prefix = text[0]
+                        digits = re.sub(r"\D", "", text[1:])
+                        if not digits:
+                            continue
 
-                        if cleaned:
-                            ocr_results.append(cleaned)
+                        number = int(digits)
+                        if number <= 0:
+                            continue
 
-                    text = ocr_results[0] if ocr_results else ""
-                except Exception as ex:
-                    text = ""
-                    print(f"OCR_ERROR: {ex}", file=sys.stderr)
-                candidates.append({
-                    "xPercent": (ox + ow / 2) / original_w,
-                    "yPercent": (oy + oh / 2) / original_h,
-                    "widthPercent": ow / original_w,
-                    "heightPercent": oh / original_h,
-                    "confidence": 0.55,
-                    "source": source_name,
-                    "text": text
-                })
+                        text = f"{prefix}{number:02d}"
 
-    # Method 1: dark text.
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    dark = cv2.adaptiveThreshold(
-        blur,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        31,
-        7
-    )
-    add_candidates(dark, "adaptive_dark")
+                        detected[text] = {
+                            "xPercent": (x + w / 2) / original_w,
+                            "yPercent": (y + h / 2) / original_h,
+                            "widthPercent": w / original_w,
+                            "heightPercent": h / original_h,
+                            "confidence": 0.98,
+                            "source": "blue_label_box_ocr",
+                            "text": text
+                        }
+                    found = True
+                    break
+        debug_log(f"BOXES_FOUND={len(boxes)}")
+        debug_log(f"DETECTED={list(detected.keys())}")
+        debug_log("========== OCR END ==========")
+        return list(detected.values())
 
-    # Method 2: global dark threshold.
-    _, global_dark = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY_INV)
-    add_candidates(global_dark, "global_dark")
-
-    # Method 3: edge based, catches boxed/outlined labels.
-    edges = cv2.Canny(gray, 60, 180)
-    add_candidates(edges, "edges")
-
-    # Method 4: red/blue/colored marker text or boxes.
-    hsv = cv2.cvtColor(big, cv2.COLOR_BGR2HSV)
-
-    # red has two HSV ranges
-    red1 = cv2.inRange(hsv, np.array([0, 35, 40]), np.array([15, 255, 255]))
-    red2 = cv2.inRange(hsv, np.array([160, 35, 40]), np.array([180, 255, 255]))
-    red = cv2.bitwise_or(red1, red2)
-    add_candidates(red, "red")
-
-    blue = cv2.inRange(hsv, np.array([85, 35, 40]), np.array([135, 255, 255]))
-    add_candidates(blue, "blue")
-
-    # Deduplicate nearby boxes.
-    unique = []
-    for r in sorted(candidates, key=lambda v: (v["yPercent"], v["xPercent"])):
-        duplicate = False
-        for u in unique:
-            dx = abs(r["xPercent"] - u["xPercent"])
-            dy = abs(r["yPercent"] - u["yPercent"])
-            if dx < 0.018 and dy < 0.018:
-                duplicate = True
-                # Keep larger/more confident candidate.
-                if r["widthPercent"] * r["heightPercent"] > u["widthPercent"] * u["heightPercent"]:
-                    u.update(r)
-                break
-
-        if not duplicate:
-            unique.append(r)
-
-    # Filter out very top/bottom page noise if needed, but keep broad by default.
-    unique = [
-        r for r in unique
-        if 0 <= r["xPercent"] <= 1 and 0 <= r["yPercent"] <= 1
-    ]
-
-    unique.sort(key=lambda r: (round(r["yPercent"], 2), r["xPercent"]))
-
-    return unique[:80]
+    except Exception as ex:
+        debug_log(f"OCR_ERROR: {ex}")
+        print(f"OCR_ERROR: {ex}", file=sys.stderr)
+        return list(detected.values())
 
 if __name__ == "__main__":
     image_path = sys.argv[1]

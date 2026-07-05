@@ -416,10 +416,30 @@ def percent_to_unit(value):
         number = number / 100.0
 
     return max(0.0, min(number, 1.0))
+def is_ocr_existing_label_marker(marker):
+    notes = str(
+        marker.get("notes")
+        or marker.get("Notes")
+        or ""
+    ).strip().lower()
+
+    source = str(
+        marker.get("source")
+        or marker.get("Source")
+        or ""
+    ).strip().lower()
+
+    return "ocr-existing-label" in notes or source == "existing-image"
+
 def marker_points_for_image(markers, image_width, image_height, outer_pad, y_offset=0):
     points = []
 
     for marker in markers:
+        if marker.get("suppressRender") or marker.get("SuppressRender"):
+            continue
+        if is_ocr_existing_label_marker(marker):
+            continue
+
         label = str(marker.get("markerLabel") or "").strip()
         if not label:
             continue

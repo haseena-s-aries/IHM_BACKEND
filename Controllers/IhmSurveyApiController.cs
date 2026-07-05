@@ -179,6 +179,10 @@ namespace Survey_Certification_App.Controllers
                     IhmAreaId = request.IhmAreaId,
                     IhmCheckpointId = request.IhmCheckpointId,
                     ImagePath = normalizedImagePath,
+                    Notes = request.Notes,
+                    Source = request.Source,
+                    SuppressRender = request.SuppressRender,
+                    IsManualForExistingImage = request.IsManualForExistingImage,
                     CreatedByUserId = request.CreatedByUserId ?? GetCurrentUserId() ?? 0,
                     CreatedAt = DateTime.UtcNow
                 };
@@ -190,6 +194,9 @@ namespace Survey_Certification_App.Controllers
             marker.YPercent = request.YPercent;
             marker.MarkerLabel = markerLabel;
             marker.Notes = request.Notes;
+            marker.Source = request.Source;
+            marker.SuppressRender = request.SuppressRender;
+            marker.IsManualForExistingImage = request.IsManualForExistingImage;
 
             await _db.SaveChangesAsync();
 
@@ -230,8 +237,9 @@ namespace Survey_Certification_App.Controllers
                 return NotFound($"Layout image not found: {normalizedImagePath}");
 
             var checkpoints = await _db.IhmCheckpoints
-                .Where(x => x.SurveyJobId == jobId && x.IhmAreaId == request.AreaId)
+                .Where(x => x.SurveyJobId == jobId)
                 .Where(x => !string.IsNullOrWhiteSpace(x.Sample_No))
+                .Where(x => x.CheckResult != null && x.CheckResult.Trim().ToUpper() == "YES")
                 .OrderBy(x => x.SourceRowNumber)
                 .ThenBy(x => x.Sample_No)
                 .ToListAsync();
@@ -321,6 +329,13 @@ namespace Survey_Certification_App.Controllers
                 marker.MarkerLabel = checkpoint.Sample_No;
                 marker.XPercent = Math.Clamp(region.XPercent, 0, 1);
                 marker.YPercent = Math.Clamp(region.YPercent, 0, 1);
+
+                // OCR coordinates point to an existing label already printed in the uploaded image.
+                // This marker is a checkpoint-to-existing-label mapping only; renderers must not draw it again.
+                marker.Notes = "ocr-existing-label";
+                marker.Source = "existing-image";
+                marker.SuppressRender = false;
+                marker.IsManualForExistingImage = false;
             }
 
             await _db.SaveChangesAsync();
@@ -1419,7 +1434,11 @@ namespace Survey_Certification_App.Controllers
                     x.ImagePath,
                     x.MarkerLabel,
                     x.XPercent,
-                    x.YPercent
+                    x.YPercent,
+                    x.Notes,
+                    x.Source,
+                    x.SuppressRender,
+                    x.IsManualForExistingImage
                 })
                 .ToListAsync();
 
@@ -1907,7 +1926,10 @@ namespace Survey_Certification_App.Controllers
                     x.XPercent,
                     x.YPercent,
                     x.MarkerLabel,
-                    x.Notes
+                    x.Notes,
+                    x.Source,
+                    x.SuppressRender,
+                    x.IsManualForExistingImage
                 })
                 .ToListAsync();
 
@@ -2509,6 +2531,9 @@ namespace Survey_Certification_App.Controllers
                 YPercent = item.YPercent,
                 MarkerLabel = item.MarkerLabel,
                 Notes = item.Notes,
+                Source = item.Source,
+                SuppressRender = item.SuppressRender,
+                IsManualForExistingImage = item.IsManualForExistingImage,
                 CreatedByUserId = item.CreatedByUserId,
                 CreatedAt = item.CreatedAt
             };
@@ -2597,6 +2622,9 @@ namespace Survey_Certification_App.Controllers
         public decimal YPercent { get; set; }
         public string? MarkerLabel { get; set; }
         public string? Notes { get; set; }
+        public string? Source { get; set; }
+        public bool SuppressRender { get; set; }
+        public bool IsManualForExistingImage { get; set; }
         public int? CreatedByUserId { get; set; }
     }
 
@@ -2655,6 +2683,9 @@ namespace Survey_Certification_App.Controllers
         public decimal YPercent { get; set; }
         public string? MarkerLabel { get; set; }
         public string? Notes { get; set; }
+        public string? Source { get; set; }
+        public bool SuppressRender { get; set; }
+        public bool IsManualForExistingImage { get; set; }
         public int CreatedByUserId { get; set; }
         public DateTime CreatedAt { get; set; }
     }
