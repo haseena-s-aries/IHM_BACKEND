@@ -429,7 +429,11 @@ def is_ocr_existing_label_marker(marker):
         or ""
     ).strip().lower()
 
-    return "ocr-existing-label" in notes or source == "existing-image"
+    return (
+        "ocr-existing-label" in notes
+        or "manual-for-existing-image" in notes
+        or source == "existing-image"
+    )
 
 def marker_points_for_image(markers, image_width, image_height, outer_pad, y_offset=0):
     points = []

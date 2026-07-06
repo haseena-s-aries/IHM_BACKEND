@@ -298,11 +298,15 @@ public class IhmReportInfoController : ControllerBase
     .FirstOrDefaultAsync(x => x.SurveyJobId == jobId);
         data ??= new IhmReportInfo { SurveyJobId = jobId };
 
-        if (string.IsNullOrWhiteSpace(data.HazardousMaterialNoFindings))
+        var displayHazardousMaterialNoFindings = data.HazardousMaterialNoFindings;
+
+        if (string.IsNullOrWhiteSpace(displayHazardousMaterialNoFindings))
         {
-            data.HazardousMaterialNoFindings =
+            displayHazardousMaterialNoFindings =
                 await BuildDefaultHazardousMaterialNoFindings(jobId);
         }
+
+        data.HazardousMaterialNoFindings = displayHazardousMaterialNoFindings;
 
         var revisions = await _db.IhmReportRevisions
             .Where(x => x.SurveyJobId == jobId)
@@ -403,7 +407,17 @@ public class IhmReportInfoController : ControllerBase
                 SortOrder = 0
             })
             .ToListAsync();
-
+        checkpointEquipmentRows = checkpointEquipmentRows
+    .Where(x => HasEquipmentMachineryData(
+        x.EquipmentName,
+        x.Location,
+        x.MaterialClassification,
+        x.PartsWereUsed,
+        x.UnitKg,
+        x.QuantityNo,
+        x.TotalKg,
+        x.Remarks))
+    .ToList();
         var savedEquipmentRows = await _db.IhmEquipmentMachineryReportRows
             .Where(x => x.SurveyJobId == jobId)
             .OrderBy(x => x.SortOrder)
@@ -455,11 +469,28 @@ public class IhmReportInfoController : ControllerBase
                     IsHidden = false
                 };
             })
-            .Where(x => x != null)
-            .ToList();
+            .Where(x => x != null && HasEquipmentMachineryData(
+    x.EquipmentName,
+    x.Location,
+    x.MaterialClassification,
+    x.PartsWereUsed,
+    x.UnitKg,
+    x.QuantityNo,
+    x.TotalKg,
+    x.Remarks))
+.ToList();
 
         var manualEquipmentRows = savedEquipmentRows
-            .Where(x => !x.IhmCheckpointId.HasValue && !x.IsHidden)
+    .Where(x => !x.IhmCheckpointId.HasValue && !x.IsHidden)
+    .Where(x => HasEquipmentMachineryData(
+        x.EquipmentName,
+        x.Location,
+        x.MaterialClassification,
+        x.PartsWereUsed,
+        x.UnitKg,
+        x.QuantityNo,
+        x.TotalKg,
+        x.Remarks))
             .Select(x => new
             {
                 x.Id,
@@ -508,6 +539,26 @@ public class IhmReportInfoController : ControllerBase
             customAppendices
         });
     }
+    private static bool HasEquipmentMachineryData(
+    string? equipmentName,
+    string? location,
+    string? materialClassification,
+    string? partsWereUsed,
+    string? unitKg,
+    string? quantityNo,
+    string? totalKg,
+    string? remarks)
+    {
+        return !string.IsNullOrWhiteSpace(equipmentName) ||
+               !string.IsNullOrWhiteSpace(location) ||
+               !string.IsNullOrWhiteSpace(materialClassification) ||
+               !string.IsNullOrWhiteSpace(partsWereUsed) ||
+               !string.IsNullOrWhiteSpace(unitKg) ||
+               !string.IsNullOrWhiteSpace(quantityNo) ||
+               !string.IsNullOrWhiteSpace(totalKg) ||
+               !string.IsNullOrWhiteSpace(remarks);
+    }
+    
     private async Task<string?> BuildDefaultHazardousMaterialNoFindings(int jobId)
     {
         var materials = await _db.IhmCheckpoints
@@ -943,14 +994,14 @@ public class IhmReportInfoController : ControllerBase
 
             _db.IhmReportInfos.Add(existing);
         }
-        await UpsertCompany(request);
-        existing.CompanyName = request.CompanyName;
+        existing.CompanyName = request.CompanyName?.Trim();
         existing.CompanyAddress = request.CompanyAddress;
         existing.CompanyTel = request.CompanyTel;
         existing.CompanyFax = request.CompanyFax;
         existing.CompanyWebsite = request.CompanyWebsite;
         existing.CompanyEmail = request.CompanyEmail;
         existing.CompanyLogoPath = request.CompanyLogoPath;
+        await UpsertCompany(request);
 
         existing.ClientLogoPath = request.ClientLogoPath;
         existing.ClientName = string.IsNullOrWhiteSpace(request.ClientLogoPath)
@@ -967,7 +1018,8 @@ public class IhmReportInfoController : ControllerBase
         existing.RevisionNo = request.RevisionNo;
         existing.LabReportNo = request.LabReportNo;
         existing.LabReportingDate = request.LabReportingDate;
-        existing.HazardousMaterialNoFindings = request.HazardousMaterialNoFindings;
+        existing.HazardousMaterialNoFindings =
+    Merge(request.HazardousMaterialNoFindings, existing.HazardousMaterialNoFindings);
         existing.HazardousMaterialFindings = request.HazardousMaterialFindings;
         existing.ShipManagerContact = request.ShipManagerContact;
         existing.HazmatExpert = request.HazmatExpert;
@@ -1092,7 +1144,15 @@ public class IhmReportInfoController : ControllerBase
         }
         var equipmentSortOrder = 1;
 
-        foreach (var item in request.EquipmentAndMachinery)
+        foreach (var item in request.EquipmentAndMachinery.Where(x => HasEquipmentMachineryData(
+    x.EquipmentName,
+    x.Location,
+    x.MaterialClassification,
+    x.PartsWereUsed,
+    x.UnitKg,
+    x.QuantityNo,
+    x.TotalKg,
+    x.Remarks)))
         {
             _db.IhmEquipmentMachineryReportRows.Add(new IhmEquipmentMachineryReportRow
             {
@@ -1187,40 +1247,23 @@ public class IhmReportInfoController : ControllerBase
 
     private async Task UpsertCompany(SaveIhmReportInfoRequest request)
     {
+        if (!request.CompanyId.HasValue)
+            return;
+
+        var company = await _db.IhmCompanies
+            .FirstOrDefaultAsync(x => x.Id == request.CompanyId.Value);
+
+        if (company == null)
+            return;
+
         var name = request.CompanyName?.Trim();
 
         if (string.IsNullOrWhiteSpace(name))
             return;
 
-        IhmCompany? company = null;
-
-        if (request.CompanyId.HasValue)
-        {
-            company = await _db.IhmCompanies
-                .FirstOrDefaultAsync(x => x.Id == request.CompanyId.Value);
-        }
-
-        if (company == null)
-        {
-            var address = request.CompanyAddress?.Trim();
-
-            company = await _db.IhmCompanies.FirstOrDefaultAsync(x =>
-                x.CompanyName == name &&
-                (
-                    (address == null && x.FullAddress == null) ||
-                    x.FullAddress == address
-                ));
-        }
-
-        if (company == null)
-        {
-            company = new IhmCompany { CompanyName = name };
-            _db.IhmCompanies.Add(company);
-        }
-
         company.CompanyName = name;
         company.DisplayName = string.IsNullOrWhiteSpace(request.CompanyDisplayName)
-            ? company.DisplayName ?? name
+            ? name
             : request.CompanyDisplayName.Trim();
 
         company.FullAddress = request.CompanyAddress?.Trim();

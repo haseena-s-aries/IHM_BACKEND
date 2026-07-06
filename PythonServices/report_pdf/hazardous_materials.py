@@ -464,16 +464,37 @@ def erase_existing_blue_markings(image, protected_markers=None):
     green = arr[:, :, 1].astype(np.int16)
     blue = arr[:, :, 2].astype(np.int16)
 
-    # Strict marker-blue only. Do not catch room fills, black room text, or pale layout colors.
+    # Strict marker-blue mask. Avoid room fills, black text, ship outline, and pale grid.
+    strong_blue_mask = (
+        (blue > 140) &
+        (red < 110) &
+        (green < 135) &
+        ((blue - red) > 55) &
+        ((blue - green) > 35)
+    )
+
+    # Catch only anti-aliased edge pixels that are directly touching strong marker blue.
+    edge_blue_mask = (
+        (blue > 115) &
+        (red < 150) &
+        (green < 165) &
+        ((blue - red) > 35) &
+        ((blue - green) > 22)
+    )
+
+    strong_blue_mask_u8 = strong_blue_mask.astype(np.uint8) * 255
+    edge_near_strong = cv2.dilate(
+        strong_blue_mask_u8,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1
+    ) > 0
+
     blue_mask = (
-        (blue > 145) &
-        (red < 90) &
-        (green < 120) &
-        ((blue - red) > 70) &
-        ((blue - green) > 45)
+        strong_blue_mask |
+        (edge_blue_mask & edge_near_strong)
     ).astype(np.uint8) * 255
 
-    # Join only broken blue callout strokes. Keep kernel small so room contents are not joined.
+    # Use connected components only for protecting OCR-current markers.
     connect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     connected_mask = cv2.dilate(blue_mask, connect_kernel, iterations=1)
 
@@ -491,8 +512,7 @@ def erase_existing_blue_markings(image, protected_markers=None):
         px = max(0, min(px, image_w - 1))
         py = max(0, min(py, image_h - 1))
 
-        # OCR coordinate is sample-number/label position, not dot position.
-        # Protect only nearby connected blue component, not every old marking.
+        # OCR coordinate is label/text location. Protect only nearby blue component.
         search_radius_x = 130
         search_radius_y = 90
 
@@ -517,8 +537,6 @@ def erase_existing_blue_markings(image, protected_markers=None):
         )
 
         component_area = stats[component_id, cv2.CC_STAT_AREA]
-
-        # Avoid protecting a huge accidental region.
         if component_area > image_w * image_h * 0.03:
             continue
 
@@ -530,15 +548,27 @@ def erase_existing_blue_markings(image, protected_markers=None):
 
     erase_mask = cv2.bitwise_and(blue_mask, cv2.bitwise_not(protected_mask))
 
-    # Erase only marker-blue strokes. No inpaint: inpaint was damaging room text/fills.
+    # Small expansion removes anti-aliasing but avoids deleting grid/room boundaries.
     erase_mask = cv2.dilate(
         erase_mask,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
         iterations=1
     )
 
-    cleaned = arr.astype(np.uint8).copy()
-    cleaned[erase_mask > 0] = [255, 255, 255]
+    # Smooth mask edges before inpaint to avoid rectangular/white artifacts.
+    erase_mask = cv2.GaussianBlur(erase_mask, (3, 3), 0)
+    erase_mask = (erase_mask > 20).astype(np.uint8) * 255
+
+    if cv2.countNonZero(erase_mask) == 0:
+        return Image.fromarray(arr.astype(np.uint8))
+
+    # TELEA generally blends thin blue lines better than white fill.
+    cleaned = cv2.inpaint(
+        arr.astype(np.uint8),
+        erase_mask,
+        3,
+        cv2.INPAINT_TELEA
+    )
 
     return Image.fromarray(cleaned)
 
@@ -560,6 +590,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         for item in marker_items
         if (
             "ocr-existing-label" in str(item["marker"].get("notes") or item["marker"].get("Notes") or "").strip().lower()
+            or "manual-for-existing-image" in str(item["marker"].get("notes") or item["marker"].get("Notes") or "").strip().lower()
             or str(item["marker"].get("source") or item["marker"].get("Source") or "").strip().lower() == "existing-image"
         )
     ]
@@ -603,7 +634,11 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
 
         notes = str(marker.get("notes") or marker.get("Notes") or "").strip().lower()
         marker_source = str(marker.get("source") or marker.get("Source") or "").strip().lower()
-        is_existing_label = "ocr-existing-label" in notes or marker_source == "existing-image"
+        is_existing_label = (
+            "ocr-existing-label" in notes
+            or "manual-for-existing-image" in notes
+            or marker_source == "existing-image"
+        )
 
         x = outer_pad + percent_to_unit(marker.get("xPercent") or marker.get("XPercent")) * image_w
         y = outer_pad + percent_to_unit(marker.get("yPercent") or marker.get("YPercent")) * image_h
