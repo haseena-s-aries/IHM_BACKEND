@@ -1,8 +1,11 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.Models;
+using Survey_Certification_App.Models.Survey;
 using System.Diagnostics;
+using System.Security.Claims;
 using System.Text.Json;
 
 namespace Survey_Certification_App.Controllers;
@@ -11,6 +14,7 @@ namespace Survey_Certification_App.Controllers;
 
 [Route("api/pdf-editor")]
 
+[Authorize]
 public class PdfEditorController : ControllerBase
 
 {
@@ -42,6 +46,10 @@ public class PdfEditorController : ControllerBase
         if (type == null)
 
             return BadRequest("Invalid report type.");
+
+        if (!await CanAccessReportAsync(type, reportId))
+
+            return Forbid();
 
         var edits = await _db.PdfDynamicEdits
 
@@ -78,6 +86,10 @@ public class PdfEditorController : ControllerBase
         if (type == null)
 
             return BadRequest("Invalid report type.");
+
+        if (!await CanAccessReportAsync(type, reportId))
+
+            return Forbid();
 
         if (request.PageNumber < 1)
 
@@ -151,6 +163,10 @@ public class PdfEditorController : ControllerBase
 
             return BadRequest("Invalid report type.");
 
+        if (!await CanAccessReportAsync(type, reportId))
+
+            return Forbid();
+
         var edit = await _db.PdfDynamicEdits.FirstOrDefaultAsync(x =>
 
             x.Id == editId &&
@@ -215,6 +231,10 @@ public class PdfEditorController : ControllerBase
 
             return BadRequest("Invalid report type.");
 
+        if (!await CanAccessReportAsync(type, reportId))
+
+            return Forbid();
+
         var edit = await _db.PdfDynamicEdits.FirstOrDefaultAsync(x =>
 
             x.Id == editId &&
@@ -253,6 +273,10 @@ public class PdfEditorController : ControllerBase
 
             return BadRequest("Invalid report type.");
 
+        if (!await CanAccessReportAsync(type, reportId))
+
+            return Forbid();
+
         var edits = await _db.PdfDynamicEdits
 
             .Where(x => x.ReportType == type && x.ReportId == reportId)
@@ -284,6 +308,10 @@ public class PdfEditorController : ControllerBase
             return BadRequest(
 
                 "Advanced pagination is currently supported for IHM reports only.");
+
+        if (!await CanAccessReportAsync(type, reportId))
+
+            return Forbid();
 
         var sourcePath = await GetPdfPath(type, reportId);
 
@@ -538,6 +566,86 @@ public class PdfEditorController : ControllerBase
             ? type
 
             : null;
+
+    }
+
+    private int? GetCurrentUserId()
+
+    {
+
+        var idValue =
+
+            User.FindFirstValue(ClaimTypes.NameIdentifier) ??
+
+            User.FindFirstValue("sub") ??
+
+            User.FindFirstValue("userId");
+
+        return int.TryParse(idValue, out var id) ? id : null;
+
+    }
+
+    private bool IsCurrentUserAdmin()
+
+    {
+
+        var role =
+
+            User.FindFirstValue(ClaimTypes.Role) ??
+
+            User.FindFirstValue("role");
+
+        return string.Equals(role, "Admin", StringComparison.OrdinalIgnoreCase);
+
+    }
+
+    private async Task<bool> CanAccessReportAsync(string type, int reportId)
+
+    {
+
+        if (IsCurrentUserAdmin())
+
+            return true;
+
+        var currentUserId = GetCurrentUserId();
+
+        if (!currentUserId.HasValue)
+
+            return false;
+
+        return type switch
+
+        {
+
+            "ihm" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
+
+                x.Id == reportId &&
+
+                x.ModuleType == SurveyModuleType.IhmSurvey &&
+
+                (x.CreatedByUserId == currentUserId.Value ||
+
+                 x.AssignedManagerId == currentUserId.Value ||
+
+                 x.AssignedUserId == currentUserId.Value ||
+
+                 x.Assignments.Any(a =>
+
+                     a.SurveyorUserId == currentUserId.Value &&
+
+                     a.Status != SurveyAssignmentStatus.Returned))),
+
+            "seafastening" => await _db.SeaFastenings.AsNoTracking().AnyAsync(x =>
+
+                x.Id == reportId &&
+
+                x.UserId == currentUserId.Value.ToString()),
+
+            "towage" or "loadout" => false,
+
+            _ => false
+
+        };
 
     }
 

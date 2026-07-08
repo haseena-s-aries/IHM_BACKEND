@@ -63,7 +63,11 @@ namespace Survey_Certification_App.Controllers
 
             var jobs = await _db.SurveyJobs
                 .Include(x => x.Assignments)
-                .Where(x => x.Assignments.Any(a => a.SurveyorUserId == currentUserId))
+                .Where(x =>
+                    x.AssignedUserId == currentUserId ||
+                    x.Assignments.Any(a =>
+                        a.SurveyorUserId == currentUserId &&
+                        a.Status != SurveyAssignmentStatus.Returned))
                 .OrderByDescending(x => x.CreatedAt)
 
                 .ToListAsync();
@@ -82,9 +86,14 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
+
             var userIds = job.Assignments
             .Select(a => a.SurveyorUserId)
             .Concat(job.Assignments.Select(a => a.AssignedByUserId))
+            .Concat(new[] { job.CreatedByUserId })
+            .Concat(job.AssignedManagerId.HasValue ? new[] { job.AssignedManagerId.Value } : Array.Empty<int>())
             .Distinct()
             .ToList();
 
@@ -115,7 +124,23 @@ namespace Survey_Certification_App.Controllers
             if (exists)
                 return BadRequest("A survey job with this job number already exists.");
 
-            var createdBy = request.CreatedByUserId ?? GetCurrentUserId() ?? 0;
+            var currentUserId = GetCurrentUserId();
+            if (!currentUserId.HasValue)
+                return Unauthorized("Login is required to create a survey job.");
+
+            var createdBy = request.CreatedByUserId ?? currentUserId.Value;
+            if (!IsCurrentUserAdmin() && createdBy != currentUserId.Value)
+                return Forbid();
+
+            if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
+            {
+                var managerExists = await _db.users.AnyAsync(x =>
+                    x.Id == request.AssignedManagerId.Value &&
+                    x.IsApproved == true &&
+                    x.Role == "Manager");
+                if (!managerExists)
+                    return BadRequest("Selected manager not found or not approved.");
+            }
 
 
             Vessel? vessel = null;
@@ -164,10 +189,11 @@ namespace Survey_Certification_App.Controllers
 
                 SiteName = request.SiteName,
                 StartDate = request.StartDate,
-        
+
                 EndDate = request.EndDate,
                 Status = SurveyJobStatus.Draft,
                 CreatedByUserId = createdBy,
+                AssignedManagerId = request.AssignedManagerId,
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -186,14 +212,28 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
+
+            if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
+            {
+                var managerExists = await _db.users.AnyAsync(x =>
+                    x.Id == request.AssignedManagerId.Value &&
+                    x.IsApproved == true &&
+                    x.Role == "Manager");
+                if (!managerExists)
+                    return BadRequest("Selected manager not found or not approved.");
+            }
+
             job.ClientName = request.ClientName;
             job.ProjectName = request.ProjectName;
             job.VesselName = request.VesselName;
             job.ImoNumber = request.ImoNumber;
             job.SiteName = request.SiteName;
             job.StartDate = request.StartDate;
-          
+
             job.EndDate = request.EndDate;
+            job.AssignedManagerId = request.AssignedManagerId;
             job.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
@@ -210,6 +250,9 @@ namespace Survey_Certification_App.Controllers
 
             if (job == null)
                 return NotFound("Survey job not found.");
+
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
 
             var alreadyAssigned = job.Assignments.Any(x =>
   x.SurveyorUserId == request.SurveyorUserId &&
@@ -235,6 +278,7 @@ namespace Survey_Certification_App.Controllers
             };
 
             job.Assignments.Add(assignment);
+            job.AssignedUserId = request.SurveyorUserId;
             job.Status = SurveyJobStatus.Assigned;
             job.UpdatedAt = DateTime.UtcNow;
             _db.UserNotifications.Add(CreateAssignmentNotification(
@@ -262,6 +306,9 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
+
             if (request.SurveyDate == null)
                 return BadRequest("Survey date is required.");
 
@@ -280,6 +327,9 @@ namespace Survey_Certification_App.Controllers
 
             if (job == null)
                 return NotFound("Survey job not found.");
+
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
 
             job.Status = request.Status;
 
@@ -372,6 +422,9 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("jobs/{id:int}/photos")]
         public async Task<IActionResult> GetPhotos(int id)
         {
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
+
             var photos = await _db.SurveyPhotos
                 .Where(x => x.SurveyJobId == id)
                 .OrderByDescending(x => x.UploadedAt)
@@ -398,6 +451,9 @@ namespace Survey_Certification_App.Controllers
             var job = await _db.SurveyJobs.FirstOrDefaultAsync(x => x.Id == id);
             if (job == null)
                 return NotFound("Survey job not found.");
+
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
 
             await using var transaction = await _db.Database.BeginTransactionAsync();
 
@@ -483,6 +539,8 @@ namespace Survey_Certification_App.Controllers
                 .Include(x => x.Assignments)
                 .AsQueryable();
 
+            query = ApplyJobAccessFilter(query);
+
             if (!string.IsNullOrWhiteSpace(moduleType))
             {
                 SurveyModuleType parsedModuleType;
@@ -503,6 +561,7 @@ namespace Survey_Certification_App.Controllers
             if (assignedSurveyorUserId.HasValue && assignedSurveyorUserId.Value > 0)
             {
                 query = query.Where(x =>
+                    x.AssignedUserId == assignedSurveyorUserId.Value ||
                     x.Assignments.Any(a =>
                         a.SurveyorUserId == assignedSurveyorUserId.Value &&
                         a.Status != SurveyAssignmentStatus.Returned));
@@ -514,18 +573,102 @@ namespace Survey_Certification_App.Controllers
 
             return Ok(await ToDtosAsync(jobs));
         }
+        private static readonly SurveyJobStatus[] CompletedSurveyStatuses =
+        {
+    SurveyJobStatus.Closed,
+    SurveyJobStatus.ReportGenerated
+};
+
 
 
 
         [HttpGet("summary")]
-        public async Task<IActionResult> GetSurveySummary()
+        public async Task<IActionResult> GetSurveySummary([FromQuery] string period = "week")
         {
-            var total = await _db.SurveyJobs.CountAsync();
-            var exSurvey = await _db.SurveyJobs.CountAsync(x => x.ModuleType == SurveyModuleType.ExSurvey);
-            var ihmSurvey = await _db.SurveyJobs.CountAsync(x => x.ModuleType == SurveyModuleType.IhmSurvey);
-            var submitted = await _db.SurveyJobs.CountAsync(x => x.Status == SurveyJobStatus.Submitted);
-            var approved = await _db.SurveyJobs.CountAsync(x => x.Status == SurveyJobStatus.Approved);
-            var returned = await _db.SurveyJobs.CountAsync(x => x.Status == SurveyJobStatus.QcReturned);
+            var now = DateTime.UtcNow;
+            var today = now.Date;
+
+            var startOfWeek = today.AddDays(-(int)today.DayOfWeek);
+            var startOfMonth = new DateTime(today.Year, today.Month, 1);
+            var startOfYear = new DateTime(today.Year, 1, 1);
+
+            // Scope to what the current user (Admin/Manager/Surveyor) can actually see
+            var scopedJobs = ApplyJobAccessFilter(_db.SurveyJobs.AsNoTracking());
+
+            var activeJobs = scopedJobs
+                .Where(x =>
+                    x.Status != SurveyJobStatus.Draft &&
+                    x.Status != SurveyJobStatus.QcReturned);
+
+            var completedJobs = activeJobs
+                .Where(x => CompletedSurveyStatuses.Contains(x.Status));
+
+            async Task<int> CountCompletedAsync(DateTime? from, DateTime? to = null)
+            {
+                var query = completedJobs;
+
+                if (from.HasValue)
+                {
+                    query = query.Where(x =>
+                        (x.UpdatedAt ?? x.EndDate ?? x.SurveyDate ?? x.CreatedAt) >= from.Value);
+                }
+
+                if (to.HasValue)
+                {
+                    query = query.Where(x =>
+                        (x.UpdatedAt ?? x.EndDate ?? x.SurveyDate ?? x.CreatedAt) < to.Value);
+                }
+
+                return await query
+                    .Select(x => x.Id)
+                    .Distinct()
+                    .CountAsync();
+            }
+
+            var total = await activeJobs.CountAsync();
+            var exSurvey = await activeJobs.CountAsync(x => x.ModuleType == SurveyModuleType.ExSurvey);
+            var ihmSurvey = await activeJobs.CountAsync(x => x.ModuleType == SurveyModuleType.IhmSurvey);
+            var submitted = await activeJobs.CountAsync(x => x.Status == SurveyJobStatus.Submitted);
+            var approved = await activeJobs.CountAsync(x => x.Status == SurveyJobStatus.Approved);
+
+            // Was querying the whole table unscoped before — now respects the same access filter
+            var returned = await scopedJobs.CountAsync(x => x.Status == SurveyJobStatus.QcReturned);
+            var attention = await scopedJobs.CountAsync(x =>
+    x.Status == SurveyJobStatus.Assigned &&
+    x.SurveyDate == null);
+            var trend = new List<SurveyCompletionTrendPointDto>();
+            var trendMode = string.Equals(period, "month", StringComparison.OrdinalIgnoreCase)
+                ? "month"
+                : "week";
+
+            if (trendMode == "month")
+            {
+                for (var i = 5; i >= 0; i--)
+                {
+                    var monthStart = new DateTime(today.Year, today.Month, 1).AddMonths(-i);
+                    var monthEnd = monthStart.AddMonths(1);
+
+                    trend.Add(new SurveyCompletionTrendPointDto
+                    {
+                        Label = monthStart.ToString("MMM"),
+                        Count = await CountCompletedAsync(monthStart, monthEnd)
+                    });
+                }
+            }
+            else
+            {
+                for (var i = 5; i >= 0; i--)
+                {
+                    var weekStart = startOfWeek.AddDays(-7 * i);
+                    var weekEnd = weekStart.AddDays(7);
+
+                    trend.Add(new SurveyCompletionTrendPointDto
+                    {
+                        Label = $"W{System.Globalization.ISOWeek.GetWeekOfYear(weekStart)}",
+                        Count = await CountCompletedAsync(weekStart, weekEnd)
+                    });
+                }
+            }
 
             return Ok(new SurveySummaryDto
             {
@@ -534,7 +677,13 @@ namespace Survey_Certification_App.Controllers
                 IhmSurveyJobs = ihmSurvey,
                 SubmittedJobs = submitted,
                 ApprovedJobs = approved,
-                ReturnedJobs = returned
+                ReturnedJobs = returned,
+                AttentionJobs = attention,
+                ThisWeekCompletedJobs = await CountCompletedAsync(startOfWeek),
+                ThisMonthCompletedJobs = await CountCompletedAsync(startOfMonth),
+                ThisYearCompletedJobs = await CountCompletedAsync(startOfYear),
+                OverallCompletedJobs = await CountCompletedAsync(null),
+                CompletionTrend = trend
             });
         }
 
@@ -548,6 +697,9 @@ namespace Survey_Certification_App.Controllers
 
             if (job == null)
                 return NotFound("Survey job not found.");
+
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
 
             if (request.PrimarySurveyorUserId.HasValue &&
                 request.SecondarySurveyorUserId.HasValue &&
@@ -613,6 +765,9 @@ namespace Survey_Certification_App.Controllers
             job.Status = surveyorIds.Any()
                 ? SurveyJobStatus.Assigned
                 : SurveyJobStatus.Draft;
+            job.AssignedUserId = surveyorIds.FirstOrDefault() > 0
+                ? surveyorIds.First()
+                : null;
 
             job.UpdatedAt = DateTime.UtcNow;
 
@@ -630,11 +785,48 @@ namespace Survey_Certification_App.Controllers
             return Ok(ToDto(job));
         }
 
+        [HttpPost("jobs/{id:int}/assigned-manager")]
+        public async Task<IActionResult> UpdateAssignedManager(
+            int id,
+            [FromBody] UpdateAssignedManagerRequest request)
+        {
+            var job = await _db.SurveyJobs
+                .Include(x => x.Assignments)
+                .FirstOrDefaultAsync(x => x.Id == id);
+
+            if (job == null)
+                return NotFound("Survey job not found.");
+
+            if (!await CanAccessJobAsync(id))
+                return Forbid();
+
+            if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
+            {
+                var managerExists = await _db.users.AnyAsync(x =>
+                    x.Id == request.AssignedManagerId.Value &&
+                    x.IsApproved == true &&
+                    x.Role == "Manager");
+                if (!managerExists)
+                    return BadRequest("Selected manager not found or not approved.");
+            }
+
+            job.AssignedManagerId = request.AssignedManagerId;
+            job.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync();
+            return Ok(ToDto(job));
+        }
+
         public class AssignSurveyorsRequest
         {
             public int? PrimarySurveyorUserId { get; set; }
             public int? SecondarySurveyorUserId { get; set; }
             public int? AssignedByUserId { get; set; }
+        }
+
+        public class UpdateAssignedManagerRequest
+        {
+            public int? AssignedManagerId { get; set; }
         }
 
 
@@ -649,6 +841,50 @@ namespace Survey_Certification_App.Controllers
                 User.FindFirstValue("userId");
 
             return int.TryParse(claimValue, out var userId) ? userId : null;
+        }
+
+        private string GetCurrentUserRole()
+        {
+            return User.FindFirstValue(ClaimTypes.Role) ??
+                User.FindFirstValue("role") ??
+                string.Empty;
+        }
+
+        private bool IsCurrentUserAdmin() =>
+            string.Equals(GetCurrentUserRole(), "Admin", StringComparison.OrdinalIgnoreCase);
+
+        private IQueryable<SurveyJob> ApplyJobAccessFilter(IQueryable<SurveyJob> query)
+        {
+            if (IsCurrentUserAdmin())
+                return query;
+
+            var currentUserId = GetCurrentUserId();
+            if (!currentUserId.HasValue || currentUserId.Value <= 0)
+                return query.Where(x => false);
+
+            var role = GetCurrentUserRole();
+            if (string.Equals(role, "Manager", StringComparison.OrdinalIgnoreCase))
+            {
+                return query.Where(x =>
+                    x.CreatedByUserId == currentUserId.Value ||
+                    x.AssignedManagerId == currentUserId.Value ||
+                    x.AssignedUserId == currentUserId.Value ||
+                    x.Assignments.Any(a =>
+                        a.SurveyorUserId == currentUserId.Value &&
+                        a.Status != SurveyAssignmentStatus.Returned));
+            }
+
+            return query.Where(x =>
+                x.AssignedUserId == currentUserId.Value ||
+                x.Assignments.Any(a =>
+                    a.SurveyorUserId == currentUserId.Value &&
+                    a.Status != SurveyAssignmentStatus.Returned));
+        }
+
+        private async Task<bool> CanAccessJobAsync(int jobId)
+        {
+            return await ApplyJobAccessFilter(_db.SurveyJobs.AsQueryable())
+                .AnyAsync(x => x.Id == jobId);
         }
 
         private async Task<string> GetUserDisplayNameAsync(int userId)
@@ -749,6 +985,9 @@ namespace Survey_Certification_App.Controllers
             var userIds = jobs
                 .SelectMany(j => j.Assignments.Select(a => a.SurveyorUserId)
                     .Concat(j.Assignments.Select(a => a.AssignedByUserId)))
+                .Concat(jobs.Select(j => j.CreatedByUserId))
+                .Concat(jobs.Where(j => j.AssignedUserId.HasValue).Select(j => j.AssignedUserId!.Value))
+                .Concat(jobs.Where(j => j.AssignedManagerId.HasValue).Select(j => j.AssignedManagerId!.Value))
                 .Distinct()
                 .ToList();
 
@@ -810,6 +1049,13 @@ namespace Survey_Certification_App.Controllers
                 EndDate = job.EndDate,
                 Status = job.Status.ToString(),
                 CreatedByUserId = job.CreatedByUserId,
+                AssignedUserId = job.AssignedUserId,
+                AssignedManagerId = job.AssignedManagerId,
+                AssignedManagerName = job.AssignedManagerId.HasValue &&
+                    userNames != null &&
+                    userNames.TryGetValue(job.AssignedManagerId.Value, out var managerName)
+                        ? managerName
+                        : null,
                 CreatedAt = job.CreatedAt,
                 UpdatedAt = job.UpdatedAt,
                 AuditPort = job.AuditPort,
@@ -853,6 +1099,7 @@ namespace Survey_Certification_App.Controllers
 
 
             public int? CreatedByUserId { get; set; }
+            public int? AssignedManagerId { get; set; }
         }
 
         public class UpdateSurveyJobRequest
@@ -869,6 +1116,7 @@ namespace Survey_Certification_App.Controllers
 
             public string? AuditPort { get; set; }
             public string? AuditAddress { get; set; }
+            public int? AssignedManagerId { get; set; }
 
 
             public DateTime? StartDate { get; set; }
@@ -925,6 +1173,9 @@ namespace Survey_Certification_App.Controllers
             public string Status { get; set; } = string.Empty;
 
             public int CreatedByUserId { get; set; }
+            public int? AssignedUserId { get; set; }
+            public int? AssignedManagerId { get; set; }
+            public string? AssignedManagerName { get; set; }
 
             public DateTime CreatedAt { get; set; }
 
@@ -982,16 +1233,25 @@ namespace Survey_Certification_App.Controllers
         public class SurveySummaryDto
         {
             public int TotalSurveyJobs { get; set; }
-
             public int ExSurveyJobs { get; set; }
-
             public int IhmSurveyJobs { get; set; }
-
             public int SubmittedJobs { get; set; }
-
             public int ApprovedJobs { get; set; }
-
             public int ReturnedJobs { get; set; }
+
+            public int AttentionJobs { get; set; }
+            public int ThisWeekCompletedJobs { get; set; }
+            public int ThisMonthCompletedJobs { get; set; }
+            public int ThisYearCompletedJobs { get; set; }
+            public int OverallCompletedJobs { get; set; }
+
+            public List<SurveyCompletionTrendPointDto> CompletionTrend { get; set; } = new();
+        }
+
+        public class SurveyCompletionTrendPointDto
+        {
+            public string Label { get; set; } = string.Empty;
+            public int Count { get; set; }
         }
 
     }

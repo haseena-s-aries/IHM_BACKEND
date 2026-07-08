@@ -6,6 +6,7 @@ using Survey_Certification_App.Data;
 using Survey_Certification_App.DTOS;
 using Survey_Certification_App.Models;
 using Survey_Certification_App.Models.Survey;
+using System.Security.Claims;
 
 namespace Survey_Certification_App.Controllers
 {
@@ -100,9 +101,16 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("view-pdf/{type}/{id}")]
         public async Task<IActionResult> ViewPdf(string type, int id)
         {
+            var normalizedType = NormalizeReportType(type);
+            if (normalizedType == null)
+                return BadRequest("Invalid certificate type.");
+
+            if (!await CanAccessReportAsync(normalizedType, id))
+                return Forbid();
+
             object cert = null;
 
-            switch (type.ToLower())
+            switch (normalizedType)
             {
                 case "towage":
                     cert = await _db.certificates.FindAsync(id);
@@ -113,8 +121,6 @@ namespace Survey_Certification_App.Controllers
                 case "loadout":
                     cert = await _db.loadoutCertificates.FindAsync(id);
                     break;
-                default:
-                    return BadRequest("Invalid certificate type.");
             }
 
             if (cert == null)
@@ -250,7 +256,14 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("report-data/{type}/{id}")]
         public async Task<IActionResult> GetReportData(string type, int id)
         {
-            object? report = type.Trim().ToLowerInvariant() switch
+            var normalizedType = NormalizeReportType(type);
+            if (normalizedType == null)
+                return BadRequest("Invalid report type.");
+
+            if (!await CanAccessReportAsync(normalizedType, id))
+                return Forbid();
+
+            object? report = normalizedType switch
             {
                 "towage" => await _db.certificates.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id),
                 "seafastening" => await _db.SeaFastenings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id),
@@ -264,51 +277,112 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("saved-reports")]
         public async Task<IActionResult> GetSavedReports()
         {
-            var towage = await _db.certificates.AsNoTracking().Select(x => new SavedReportDto
+            var currentUserId = GetCurrentUserId();
+            var isAdmin = IsCurrentUserAdmin();
+            var userIdText = currentUserId?.ToString();
+
+            var towageQuery = _db.certificates.AsNoTracking();
+            if (!isAdmin)
+            {
+                // Towage certificates do not currently persist creator ownership.
+                // Do not expose unowned reports to managers.
+                towageQuery = towageQuery.Where(x => false);
+            }
+
+            var towage = await towageQuery.Select(x => new SavedReportDto
             {
                 Id = x.Id,
                 ReportType = "towage",
                 Title = string.IsNullOrWhiteSpace(x.ProjectTitle) ? x.CertificateType : x.ProjectTitle,
                 VesselName = string.IsNullOrWhiteSpace(x.TowName) ? x.TugName : x.TowName,
                 Reference = x.CertificateNumber,
+                Status = "Saved",
+                CreatedBy = x.SurveyedBy,
                 SavedDate = x.IssuedDate,
                 PdfFilePath = x.PdfFilePath
             }).ToListAsync();
 
-            var seaFastening = await _db.SeaFastenings.AsNoTracking().Select(x => new SavedReportDto
+            var seaFasteningQuery = _db.SeaFastenings.AsNoTracking();
+            if (!isAdmin)
+            {
+                seaFasteningQuery = seaFasteningQuery.Where(x => userIdText != null && x.UserId == userIdText);
+            }
+
+            var seaFastening = await seaFasteningQuery.Select(x => new SavedReportDto
             {
                 Id = x.Id,
                 ReportType = "seafastening",
                 Title = string.IsNullOrWhiteSpace(x.ProjectTitle) ? x.CertificateTitle : x.ProjectTitle,
                 VesselName = x.TransportUnit,
                 Reference = x.CertificateNumber,
+                Status = "Saved",
+                CreatedBy = x.IssuedBy,
                 SavedDate = x.IssuedDate,
                 PdfFilePath = x.PdfFilePath
             }).ToListAsync();
 
-            var loadout = await _db.loadoutCertificates.AsNoTracking().Select(x => new SavedReportDto
+            var loadoutQuery = _db.loadoutCertificates.AsNoTracking();
+            if (!isAdmin)
+            {
+                // Loadout certificates do not currently persist creator ownership.
+                // Do not expose unowned reports to managers.
+                loadoutQuery = loadoutQuery.Where(x => false);
+            }
+
+            var loadout = await loadoutQuery.Select(x => new SavedReportDto
             {
                 Id = x.Id,
                 ReportType = "loadout",
                 Title = string.IsNullOrWhiteSpace(x.ProjectTitle) ? x.CertificateTitle : x.ProjectTitle,
                 VesselName = x.BargeVessel,
                 Reference = x.CertificateNumber,
+                Status = "Saved",
+                CreatedBy = x.IssuedBy,
                 SavedDate = x.IssuedDate,
                 PdfFilePath = x.PdfFilePath
             }).ToListAsync();
 
-            var ihmJobs = await _db.SurveyJobs
+            var ihmJobsQuery = _db.SurveyJobs
                 .AsNoTracking()
-                .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey)
-                .Select(x => new { x.Id, x.VesselName, x.ProjectName, x.JobNumber })
+                .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey);
+
+            if (!isAdmin && currentUserId.HasValue)
+            {
+                ihmJobsQuery = ihmJobsQuery.Where(x =>
+                    x.CreatedByUserId == currentUserId.Value ||
+                    x.AssignedManagerId == currentUserId.Value ||
+                    x.AssignedUserId == currentUserId.Value ||
+                    x.Assignments.Any(a =>
+                        a.SurveyorUserId == currentUserId.Value &&
+                        a.Status != SurveyAssignmentStatus.Returned));
+            }
+            else if (!isAdmin)
+            {
+                ihmJobsQuery = ihmJobsQuery.Where(x => false);
+            }
+
+            var ihmJobs = await ihmJobsQuery
+                .Select(x => new { x.Id, x.VesselName, x.ProjectName, x.JobNumber, x.Status, x.CreatedByUserId, x.CreatedAt })
                 .ToListAsync();
+
+            var createdUserIds = ihmJobs
+                .Select(x => x.CreatedByUserId)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+            var usersById = createdUserIds.Count == 0
+                ? new Dictionary<int, string>()
+                : await _db.users
+                    .AsNoTracking()
+                    .Where(x => createdUserIds.Contains(x.Id))
+                    .ToDictionaryAsync(x => x.Id, x => x.FullName ?? x.Email ?? $"User {x.Id}");
 
             var reportsRoot = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "reports", "ihm");
             var ihmReports = ihmJobs.Select(job => new
-                {
-                    Job = job,
-                    PdfPath = Path.Combine(reportsRoot, job.Id.ToString(), "ihm-report.pdf")
-                })
+            {
+                Job = job,
+                PdfPath = Path.Combine(reportsRoot, job.Id.ToString(), "ihm-report.pdf")
+            })
                 .Where(x => System.IO.File.Exists(x.PdfPath))
                 .Select(x => new SavedReportDto
                 {
@@ -317,6 +391,11 @@ namespace Survey_Certification_App.Controllers
                     Title = string.IsNullOrWhiteSpace(x.Job.ProjectName) ? "IHM Survey Report" : x.Job.ProjectName,
                     VesselName = x.Job.VesselName,
                     Reference = x.Job.JobNumber,
+                    Status = x.Job.Status.ToString(),
+                    CreatedByUserId = x.Job.CreatedByUserId,
+                    CreatedBy = usersById.TryGetValue(x.Job.CreatedByUserId, out var creator)
+                        ? creator
+                        : "Not confirmed",
                     SavedAt = System.IO.File.GetLastWriteTimeUtc(x.PdfPath),
                     PdfFilePath = x.PdfPath
                 });
@@ -338,6 +417,9 @@ namespace Survey_Certification_App.Controllers
             public string? Title { get; set; }
             public string? VesselName { get; set; }
             public string? Reference { get; set; }
+            public string? Status { get; set; }
+            public string? CreatedBy { get; set; }
+            public int? CreatedByUserId { get; set; }
             public DateOnly? SavedDate { get; set; }
             public DateTime? SavedAt { get; set; }
             [System.Text.Json.Serialization.JsonIgnore]
@@ -507,12 +589,16 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("generate-pdf")]
         public async Task<IActionResult> GeneratePdf(string type, int id)
         {
-            if (string.IsNullOrWhiteSpace(type))
-                return BadRequest("Certificate type is required");
+            var normalizedType = NormalizeReportType(type);
+            if (normalizedType == null)
+                return BadRequest("Invalid certificate type.");
+
+            if (!await CanAccessReportAsync(normalizedType, id))
+                return Forbid();
 
             object cert = null;
 
-            switch (type.ToLower())
+            switch (normalizedType)
             {
                 case "seafastening":
                     cert = await _db.SeaFastenings.FindAsync(id);
@@ -523,19 +609,72 @@ namespace Survey_Certification_App.Controllers
                 case "loadout":
                     cert = await _db.loadoutCertificates.FindAsync(id);
                     break;
-                default:
-                    return BadRequest("Invalid certificate type.");
             }
 
             if (cert == null)
                 return NotFound("Certificate not found.");
 
             // ✅ Call the helper function inside the same class
-            byte[] pdfBytes = GenerateCertificatePdf(cert, type);
+            byte[] pdfBytes = GenerateCertificatePdf(cert, normalizedType);
 
-            Response.Headers.Add("Content-Disposition", "inline; filename=" + $"{type}_certificate_{id}.pdf");
+            Response.Headers.Add("Content-Disposition", "inline; filename=" + $"{normalizedType}_certificate_{id}.pdf");
             return File(pdfBytes, "application/pdf");
 
+        }
+
+        private static string? NormalizeReportType(string? type)
+        {
+            var value = (type ?? string.Empty).Trim().ToLowerInvariant();
+            return value is "towage" or "seafastening" or "loadout" or "ihm" ? value : null;
+        }
+
+        private int? GetCurrentUserId()
+        {
+            var idValue =
+                User.FindFirstValue(ClaimTypes.NameIdentifier) ??
+                User.FindFirstValue("sub") ??
+                User.FindFirstValue("userId");
+
+            return int.TryParse(idValue, out var id) ? id : null;
+        }
+
+        private bool IsCurrentUserAdmin()
+        {
+            var role =
+                User.FindFirstValue(ClaimTypes.Role) ??
+                User.FindFirstValue("role");
+
+            return string.Equals(role, "Admin", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async Task<bool> CanAccessReportAsync(string type, int id)
+        {
+            if (IsCurrentUserAdmin())
+                return true;
+
+            var currentUserId = GetCurrentUserId();
+            if (!currentUserId.HasValue)
+                return false;
+
+            return type switch
+            {
+                "ihm" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
+                    x.Id == id &&
+                    x.ModuleType == SurveyModuleType.IhmSurvey &&
+                    (x.CreatedByUserId == currentUserId.Value ||
+                     x.AssignedManagerId == currentUserId.Value ||
+                     x.AssignedUserId == currentUserId.Value ||
+                     x.Assignments.Any(a =>
+                         a.SurveyorUserId == currentUserId.Value &&
+                         a.Status != SurveyAssignmentStatus.Returned))),
+                "seafastening" => await _db.SeaFastenings.AsNoTracking().AnyAsync(x =>
+                    x.Id == id &&
+                    x.UserId == currentUserId.Value.ToString()),
+                // Towage and loadout do not have persisted creator ownership yet.
+                // Keep manager access closed instead of leaking another user's PDF.
+                "towage" or "loadout" => false,
+                _ => false
+            };
         }
 
         // ✅ PLACE THIS HELPER METHOD INSIDE THIS CLASS
@@ -617,6 +756,35 @@ namespace Survey_Certification_App.Controllers
                 document.Close();
                 return ms.ToArray();
             }
+
+
         }
+
+        [HttpGet("fleet-summary")]
+        public async Task<IActionResult> GetFleetSummary()
+        {
+            // ⚠️ ASSUMPTION: adjust field names below to match your actual Vessel entity
+            var vessels = await _db.Vessels
+                .AsNoTracking()
+                .OrderByDescending(v => v.Id) // swap for v.UpdatedAt / v.CreatedAt if you have one
+                .Take(4)
+                .Select(v => new VesselSummaryDto
+                {
+                    Id = v.Id,
+                    Name = v.VesselName,
+                    Location = v.VesselType,      // or v.Location
+                                                  // e.g. "On survey", "Certified", "Towage", "Issued"
+                })
+                .ToListAsync();
+
+            return Ok(vessels);
+        }
+    }
+
+    internal class VesselSummaryDto
+    {
+        public int Id { get; set; }
+        public string Name { get; set; }
+        public string Location { get; set; }
     }
 }

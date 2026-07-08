@@ -2242,8 +2242,29 @@ namespace Survey_Certification_App.Controllers
         }
 
         [HttpGet("jobs/{jobId:int}/report-pdf")]
-        public IActionResult GetGeneratedReportPdf(int jobId)
+        public async Task<IActionResult> GetGeneratedReportPdf(int jobId)
         {
+            var currentUserId = GetCurrentUserId();
+            var role =
+                User.FindFirstValue(System.Security.Claims.ClaimTypes.Role) ??
+                User.FindFirstValue("role");
+            var isAdmin = string.Equals(role, "Admin", StringComparison.OrdinalIgnoreCase);
+
+            var canAccess = isAdmin || (currentUserId.HasValue && await _db.SurveyJobs
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.Id == jobId &&
+                    x.ModuleType == SurveyModuleType.IhmSurvey &&
+                    (x.CreatedByUserId == currentUserId.Value ||
+                     x.AssignedManagerId == currentUserId.Value ||
+                     x.AssignedUserId == currentUserId.Value ||
+                     x.Assignments.Any(a =>
+                         a.SurveyorUserId == currentUserId.Value &&
+                         a.Status != SurveyAssignmentStatus.Returned))));
+
+            if (!canAccess)
+                return Forbid();
+
             var pdfPath = Path.Combine(
                 Directory.GetCurrentDirectory(),
                 "wwwroot",

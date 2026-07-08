@@ -1671,6 +1671,12 @@ namespace Survey_Certification_App.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
+                    b.Property<int?>("AssignedManagerId")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("AssignedUserId")
+                        .HasColumnType("int");
+
                     b.Property<string>("AuditAddress")
                         .HasColumnType("nvarchar(max)");
 
