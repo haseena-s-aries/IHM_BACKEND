@@ -581,316 +581,208 @@ namespace Survey_Certification_App.Controllers
             return null;
         }
         [HttpPost("jobs/{jobId:int}/import-excel")]
-
         public async Task<IActionResult> ImportExcel(int jobId, IFormFile file)
-
         {
-
             try
-
             {
-
                 var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
 
                 if (!jobExists)
-
                     return NotFound("Survey job not found.");
 
                 if (file == null || file.Length == 0)
-
                     return BadRequest("Excel file is required.");
 
                 var extension = Path.GetExtension(file.FileName).ToLower();
 
-                if (extension != ".xlsx" && extension != ".xls")
+                if (extension == ".xls")
+                    return BadRequest("Old .xls files are not supported. Please save the Excel file as .xlsx and upload again.");
 
-                    return BadRequest("Only Excel files are allowed.");
+                if (extension != ".xlsx")
+                    return BadRequest("Only .xlsx Excel files are allowed.");
 
                 var uploadFolder = Path.Combine(
-
-                    Directory.GetCurrentDirectory(),
-
-                    "wwwroot",
-
-                    "uploads",
-
-                    "ihm-excel"
-
-                );
+                Directory.GetCurrentDirectory(),
+                "wwwroot",
+                "uploads",
+                "ihm-excel"
+            );
 
                 Directory.CreateDirectory(uploadFolder);
 
                 var storedFileName = $"{jobId}_{Guid.NewGuid()}{extension}";
-
                 var filePath = Path.Combine(uploadFolder, storedFileName);
 
                 await using (var stream = new FileStream(filePath, FileMode.Create))
-
                 {
-
                     await file.CopyToAsync(stream);
-
                 }
 
                 var parserPath = Path.Combine(
-
                     Directory.GetCurrentDirectory(),
-
                     "PythonServices",
-
                     "parse_ihm_excel.py"
-
                 );
 
                 if (!System.IO.File.Exists(parserPath))
-
                     return StatusCode(500, "Python parser file not found.");
 
                 var startInfo = new ProcessStartInfo
-
                 {
-
                     FileName = "python",
-
                     Arguments = $"\"{parserPath}\" \"{filePath}\"",
-
                     RedirectStandardOutput = true,
-
                     RedirectStandardError = true,
-
                     UseShellExecute = false,
-
                     CreateNoWindow = true
-
                 };
 
                 using var process = Process.Start(startInfo);
 
                 if (process == null)
-
                     return StatusCode(500, "Unable to start Python parser.");
 
                 var output = await process.StandardOutput.ReadToEndAsync();
-
                 var error = await process.StandardError.ReadToEndAsync();
 
                 await process.WaitForExitAsync();
 
                 if (process.ExitCode != 0)
-
                     return StatusCode(500, string.IsNullOrWhiteSpace(error) ? output : error);
 
                 var parsed = JsonSerializer.Deserialize<IhmExcelParseResult>(
-
                     output,
-
                     new JsonSerializerOptions
-
                     {
-
                         PropertyNameCaseInsensitive = true
-
                     }
-
                 );
 
                 if (parsed == null || !parsed.Success)
-
                     return BadRequest(parsed?.Message ?? "Unable to parse Excel file.");
 
                 if (parsed.Areas == null || parsed.Areas.Count == 0 || parsed.Areas.Sum(x => x.Checkpoints.Count) == 0)
-
                     return BadRequest("Invalid Excel format. Please upload the VSCP Checklist Template file.");
 
                 await using var transaction = await _db.Database.BeginTransactionAsync();
 
                 var oldMarkers = await _db.IhmImageMarkers
-
                     .Where(x => x.SurveyJobId == jobId)
-
                     .ToListAsync();
 
                 var oldCheckpoints = await _db.IhmCheckpoints
-
                     .Where(x => x.SurveyJobId == jobId)
-
                     .ToListAsync();
 
                 var oldAreas = await _db.IhmAreas
-
                     .Where(x => x.SurveyJobId == jobId)
-
                     .ToListAsync();
 
                 var oldEquipmentRows = await _db.IhmEquipmentMachineryReportRows
-
                     .Where(x => x.SurveyJobId == jobId && x.IhmCheckpointId.HasValue)
-
                     .ToListAsync();
 
                 foreach (var row in oldEquipmentRows)
-
                 {
-
                     row.IhmCheckpointId = null;
-
                 }
 
                 var oldSamplingPhotos = await _db.IhmSamplingPhotos
-
                     .Where(x => x.SurveyJobId == jobId &&
-
                                 (x.IhmCheckpointId.HasValue || x.IhmAreaId.HasValue))
-
                     .ToListAsync();
 
                 foreach (var photo in oldSamplingPhotos)
-
                 {
-
                     photo.IhmCheckpointId = null;
-
                     photo.IhmAreaId = null;
-
                 }
 
                 _db.IhmImageMarkers.RemoveRange(oldMarkers);
-
                 _db.IhmCheckpoints.RemoveRange(oldCheckpoints);
-
                 _db.IhmAreas.RemoveRange(oldAreas);
 
                 await _db.SaveChangesAsync();
 
                 foreach (var areaDto in parsed.Areas)
-
                 {
-
                     var area = new IhmArea
-
                     {
-
                         SurveyJobId = jobId,
-
                         AreaName = areaDto.AreaName,
-
                         Description = areaDto.Description,
-
                         SortOrder = areaDto.SortOrder
-
                     };
 
                     _db.IhmAreas.Add(area);
-
                     await _db.SaveChangesAsync();
 
                     foreach (var checkpointDto in areaDto.Checkpoints)
-
                     {
-
                         var checkpoint = new IhmCheckpoint
-
                         {
-
                             SurveyJobId = jobId,
-
                             IhmAreaId = area.Id,
 
                             Sample_No = checkpointDto.CheckpointCode,
-
                             Description = checkpointDto.Description,
 
                             TableType = checkpointDto.TableType,
-
                             Location = checkpointDto.Location,
-
                             EquipmentName = checkpointDto.EquipmentName,
-
                             Component = checkpointDto.Component,
 
                             Table_A_B = checkpointDto.MaterialCategory,
-
                             HazardousMaterial = checkpointDto.HazardousMaterial,
 
                             QuantityUnitKg = checkpointDto.QuantityUnitKg,
-
                             QuantityNo = checkpointDto.QuantityNo,
-
                             QuantityTotalKg = checkpointDto.QuantityTotalKg,
 
                             ManufacturerBrandName = checkpointDto.ManufacturerBrandName,
-
                             DocumentAnalysisResult = checkpointDto.DocumentAnalysisResult,
-
                             SamplingCheck = checkpointDto.SamplingCheck,
-
                             VisualCheck = checkpointDto.VisualCheck,
-
                             CheckResult = checkpointDto.CheckResult,
-
                             Remarks = checkpointDto.Remarks,
 
                             SourceRowNumber = checkpointDto.SourceRowNumber,
-
                             Result = IhmCheckpointResult.Pending
-
                         };
 
                         _db.IhmCheckpoints.Add(checkpoint);
-
                     }
 
                     await _db.SaveChangesAsync();
-
                 }
 
                 await transaction.CommitAsync();
 
                 return Ok(new
-
                 {
-
                     message = "IHM Excel imported and saved as job-wise table data.",
-
                     jobId,
-
                     excelFile = $"/uploads/ihm-excel/{storedFileName}",
-
                     areaCount = parsed.Areas.Count,
-
                     checkpointCount = parsed.Areas.Sum(x => x.Checkpoints.Count)
-
                 });
-
             }
-
             catch (Exception ex)
-
             {
-
                 Console.WriteLine("========================================");
-
                 Console.WriteLine("IMPORT EXCEL EXCEPTION");
-
                 Console.WriteLine(ex.ToString());
-
                 Console.WriteLine("========================================");
 
                 return StatusCode(500, new
-
                 {
-
                     Message = ex.Message,
-
                     InnerException = ex.InnerException?.Message,
-
                     StackTrace = ex.ToString()
-
                 });
-
             }
-
         }
+
 
 
         [HttpPut("checkpoints/{checkpointId:int}/procedure")]
