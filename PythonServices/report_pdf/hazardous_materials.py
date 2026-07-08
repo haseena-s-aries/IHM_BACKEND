@@ -1,10 +1,13 @@
 from io import BytesIO
 import sys
+import json
+import hashlib
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 import re
 from pypdf import PdfReader
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import cv2
 import numpy as np
 import pytesseract
@@ -167,8 +170,93 @@ def get_ga_layout_source(data):
 
     return ga_layout_source
 _SAMPLE_LABEL_RE = re.compile(r"^[SV]\d{1,3}$", re.IGNORECASE)
+def _stable_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
+def _file_fingerprint(path):
+    path = Path(path)
+    stat = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "mtimeNs": stat.st_mtime_ns,
+        "size": stat.st_size,
+    }
 
+def _cache_key(source_path, items, extra=None):
+    payload = {
+        "source": _file_fingerprint(source_path),
+        "items": items,
+        "extra": extra or {},
+    }
+    return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
+
+def _layout_cache_dir(data):
+    job_id = ((data.get("job") or {}).get("id") or "0")
+    path = Path.cwd() / "wwwroot" / "reports" / "ihm" / str(job_id) / "layout-image-cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+def _cache_manifest_path(cache_dir, cache_key):
+    return cache_dir / f"{cache_key}.json"
+
+def _cache_image_path(cache_dir, cache_key):
+    return cache_dir / f"{cache_key}.png"
+
+def _try_cached_layout(cache_dir, cache_key):
+    manifest_path = _cache_manifest_path(cache_dir, cache_key)
+    image_path = _cache_image_path(cache_dir, cache_key)
+
+    if manifest_path.exists() and image_path.exists():
+        print(f"CACHE HIT layout={image_path}", file=sys.stderr)
+        return image_path
+
+    print(f"CACHE MISS key={cache_key}", file=sys.stderr)
+    return None
+
+def _write_cache_manifest(cache_dir, cache_key, payload):
+    _cache_manifest_path(cache_dir, cache_key).write_text(
+        _stable_json(payload),
+        encoding="utf-8"
+    )
+
+def make_hazard_pdf_ready_image(image_path, target_width_pt, target_height_pt, label):
+    image_path = Path(image_path)
+    stat = image_path.stat()
+
+    cache_dir = image_path.parent / "pdf-ready-images"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "path": str(image_path.resolve()),
+        "mtimeNs": stat.st_mtime_ns,
+        "size": stat.st_size,
+        "targetWidthPt": round(float(target_width_pt), 2),
+        "targetHeightPt": round(float(target_height_pt), 2),
+        "dpi": 150,
+        "label": label,
+    }
+
+    cache_key = hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    ready_path = cache_dir / f"{cache_key}.jpg"
+
+    if ready_path.exists():
+        print(f"CACHE HIT hazard pdf-ready image {ready_path}", file=sys.stderr)
+        return ready_path
+
+    print(f"CACHE MISS hazard pdf-ready image {image_path}", file=sys.stderr)
+
+    target_w_px = max(1, int(float(target_width_pt) / 72 * 150))
+    target_h_px = max(1, int(float(target_height_pt) / 72 * 150))
+
+    with Image.open(image_path) as img:
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        img.thumbnail((target_w_px, target_h_px), Image.Resampling.LANCZOS)
+        img.save(ready_path, "JPEG", quality=92, optimize=True)
+
+    return ready_path
 def detect_existing_sample_text_markings(image_path, expected_labels=None):
     expected = {
         normalize_sample_label(label)
@@ -176,6 +264,8 @@ def detect_existing_sample_text_markings(image_path, expected_labels=None):
         if normalize_sample_label(label)
     }
 
+    ocr_started = time.perf_counter()
+    print(f"START OCR image={image_path}", file=sys.stderr)
     image = Image.open(image_path).convert("RGB")
     image_w, image_h = image.size
     detected = {}
@@ -251,6 +341,36 @@ def detect_existing_sample_text_markings(image_path, expected_labels=None):
 
 
 def detect_all_existing_sample_markings(image_path, expected_labels=None):
+    image_path = Path(image_path)
+    expected = sorted([
+        normalize_sample_label(x)
+        for x in (expected_labels or [])
+        if normalize_sample_label(x)
+    ])
+
+    stat = image_path.stat()
+    cache_root = Path.cwd() / "wwwroot" / "reports" / "ihm" / "ocr-cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    cache_payload = {
+        "path": str(image_path.resolve()),
+        "mtimeNs": stat.st_mtime_ns,
+        "size": stat.st_size,
+        "expected": expected,
+    }
+
+    cache_key = hashlib.sha256(
+        json.dumps(cache_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    cache_file = cache_root / f"{cache_key}.json"
+
+    if cache_file.exists():
+        print(f"CACHE HIT OCR {image_path}", file=sys.stderr)
+        return json.loads(cache_file.read_text(encoding="utf-8"))
+
+    print(f"CACHE MISS OCR {image_path}", file=sys.stderr)
+
     by_label = {}
 
     for item in detect_existing_blue_sample_markings(image_path):
@@ -263,7 +383,14 @@ def detect_all_existing_sample_markings(image_path, expected_labels=None):
         if label:
             by_label[label] = item
 
-    return list(by_label.values())
+    result = list(by_label.values())
+
+    cache_file.write_text(
+        json.dumps(result, ensure_ascii=False),
+        encoding="utf-8"
+    )
+
+    return result
 
 
 def collect_layout_sources_for_hazard_detection(data):
@@ -298,6 +425,8 @@ def collect_layout_sources_for_hazard_detection(data):
     return sources
 
 def detect_existing_blue_sample_markings(image_path):
+    ocr_started = time.perf_counter()
+    print(f"START OCR blue-sample image={image_path}", file=sys.stderr)
     image = Image.open(image_path).convert("RGB")
     arr = np.array(image)
 
@@ -399,7 +528,10 @@ def detect_existing_blue_sample_markings(image_path):
                 "heightPercent": h / image_h,
                 "source": "existing-image",
             })
-
+            print(
+                f"END OCR image={image_path} elapsed_ms={int((time.perf_counter() - ocr_started) * 1000)}",
+                file=sys.stderr
+            )
     return detected
 
 def dedupe_latest_markers(markers):
@@ -903,6 +1035,15 @@ def build_i2_hazard_layout_images(data):
         if sample_no not in db_common_marker_sample_nos
     ]
 
+    missing_sample_nos = [
+        sample_no
+        for sample_no in missing_sample_nos
+        if sample_no not in markers_by_label
+    ]
+
+    if not missing_sample_nos:
+        print("Hazard OCR skipped: all I-2 samples have marker positions.", file=sys.stderr)
+
     if missing_sample_nos:
         found_existing_sample_nos = set()
 
@@ -1004,12 +1145,32 @@ def build_i2_hazard_layout_images(data):
 
         output_path = output_dir / f"i2-hazard-layout-{index}.png"
 
-        generated.append(draw_hazard_marked_layout_image(
-            source_path,
-            group["items"],
-            output_path,
-            bottom_dot_offset=bottom_dot_offset
-        ))
+        cache_dir = _layout_cache_dir(data)
+        cache_payload = {
+            "source": _file_fingerprint(source_path),
+            "items": group["items"],
+            "bottomDotOffset": bottom_dot_offset,
+        }
+        cache_key = _cache_key(source_path, group["items"], {"bottomDotOffset": bottom_dot_offset})
+        cached_image = _try_cached_layout(cache_dir, cache_key)
+
+        if cached_image is None:
+            cache_image = _cache_image_path(cache_dir, cache_key)
+            started = time.perf_counter()
+            generated_image = draw_hazard_marked_layout_image(
+                source_path,
+                group["items"],
+                cache_image,
+                bottom_dot_offset=bottom_dot_offset
+            )
+            _write_cache_manifest(cache_dir, cache_key, cache_payload)
+            print(
+                f"Image processing generated={generated_image} elapsed_ms={int((time.perf_counter() - started) * 1000)}",
+                file=sys.stderr
+            )
+            generated.append(generated_image)
+        else:
+            generated.append(cached_image)
 
     return generated
 
@@ -1058,8 +1219,15 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
         draw_w = img_w * scale
         draw_h = img_h * scale
 
+        pdf_ready_image = make_hazard_pdf_ready_image(
+            image_path,
+            draw_w,
+            draw_h,
+            "hazard-i2-layout"
+        )
+
         c.drawImage(
-            str(image_path),
+            str(pdf_ready_image),
             (HAZARD_LAYOUT_PAGE_WIDTH - draw_w) / 2,
             usable_y + (usable_h - draw_h) / 2,
             width=draw_w,

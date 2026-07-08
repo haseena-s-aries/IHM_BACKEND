@@ -14,6 +14,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Collections.Concurrent;
 
 namespace Survey_Certification_App.Controllers
 {
@@ -21,6 +22,16 @@ namespace Survey_Certification_App.Controllers
     [ApiController]
     public class IhmSurveyApiController : ControllerBase
     {
+        private static readonly ConcurrentDictionary<int, IhmPdfJobState> IhmPdfJobs = new();
+
+        private sealed class IhmPdfJobState
+        {
+            public string Status { get; set; } = "processing";
+            public string? Error { get; set; }
+            public DateTime StartedUtc { get; set; } = DateTime.UtcNow;
+            public DateTime? FinishedUtc { get; set; }
+            public string? FilePath { get; set; }
+        }
         private readonly ApplicationDbContext _db;
 
         public IhmSurveyApiController(ApplicationDbContext db)
@@ -2197,48 +2208,136 @@ namespace Survey_Certification_App.Controllers
 
             await System.IO.File.WriteAllTextAsync(inputJsonPath, serializedPayload);
 
-            var venvPython = Path.Combine(
-    Directory.GetCurrentDirectory(),
-    ".venv",
-    "Scripts",
-    "python.exe"
-);
-
-            var pythonExe = System.IO.File.Exists(venvPython)
-                ? venvPython
-                : "python";
-            var startInfo = new ProcessStartInfo
+            if (IhmPdfJobs.TryGetValue(jobId, out var runningJob) &&
+    string.Equals(runningJob.Status, "processing", StringComparison.OrdinalIgnoreCase))
             {
-                FileName = pythonExe,
-                Arguments = $"\"{scriptPath}\" \"{inputJsonPath}\" \"{outputPdfPath}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
+                return Ok(new { status = "processing" });
+            }
+
+            IhmPdfJobs[jobId] = new IhmPdfJobState
+            {
+                Status = "processing",
+                StartedUtc = DateTime.UtcNow,
+                FilePath = outputPdfPath
             };
 
-            using var process = Process.Start(startInfo);
+            var requestScheme = Request.Scheme;
+            var requestHost = Request.Host.ToString();
 
-            if (process == null)
-                return StatusCode(500, "Unable to start Python report generator.");
+            _ = Task.Run(async () =>
+            {
+                var sw = Stopwatch.StartNew();
 
-            var output = await process.StandardOutput.ReadToEndAsync();
-            var error = await process.StandardError.ReadToEndAsync();
+                try
+                {
+                    var tempOutputPdfPath = outputPdfPath + ".tmp";
 
-            await process.WaitForExitAsync();
+                    if (System.IO.File.Exists(tempOutputPdfPath))
+                        System.IO.File.Delete(tempOutputPdfPath);
 
-            if (process.ExitCode != 0)
-                return StatusCode(500, string.IsNullOrWhiteSpace(error) ? output : error);
+                    var venvPython = Path.Combine(
+                        Directory.GetCurrentDirectory(),
+                        ".venv",
+                        "Scripts",
+                        "python.exe"
+                    );
 
-            if (!System.IO.File.Exists(outputPdfPath))
-                return StatusCode(500, "PDF was not generated.");
+                    var pythonExe = System.IO.File.Exists(venvPython)
+                        ? venvPython
+                        : "python";
+
+                    var startInfo = new ProcessStartInfo
+                    {
+                        FileName = pythonExe,
+                        Arguments = $"\"{scriptPath}\" \"{inputJsonPath}\" \"{tempOutputPdfPath}\"",
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+
+                    using var process = Process.Start(startInfo);
+
+                    if (process == null)
+                        throw new InvalidOperationException("Unable to start Python report generator.");
+
+                    var outputTask = process.StandardOutput.ReadToEndAsync();
+                    var errorTask = process.StandardError.ReadToEndAsync();
+
+                    await process.WaitForExitAsync();
+
+                    var output = await outputTask;
+                    var error = await errorTask;
+
+                    if (process.ExitCode != 0)
+                        throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? output : error);
+
+                    if (!System.IO.File.Exists(tempOutputPdfPath))
+                        throw new FileNotFoundException("Temporary PDF was not generated.", tempOutputPdfPath);
+
+                    if (System.IO.File.Exists(outputPdfPath))
+                        System.IO.File.Delete(outputPdfPath);
+
+                    System.IO.File.Move(tempOutputPdfPath, outputPdfPath);
+
+                    IhmPdfJobs[jobId] = new IhmPdfJobState
+                    {
+                        Status = "completed",
+                        StartedUtc = DateTime.UtcNow,
+                        FinishedUtc = DateTime.UtcNow,
+                        FilePath = outputPdfPath
+                    };
+
+                    Console.WriteLine($"IHM PDF job {jobId} completed in {sw.ElapsedMilliseconds} ms");
+                }
+                catch (Exception ex)
+                {
+                    IhmPdfJobs[jobId] = new IhmPdfJobState
+                    {
+                        Status = "failed",
+                        StartedUtc = DateTime.UtcNow,
+                        FinishedUtc = DateTime.UtcNow,
+                        FilePath = outputPdfPath,
+                        Error = ex.GetBaseException().Message
+                    };
+
+                    Console.Error.WriteLine($"IHM PDF job {jobId} failed after {sw.ElapsedMilliseconds} ms: {ex}");
+                }
+            });
+
+            return Ok(new { status = "processing" });
+        }
+
+        [HttpGet("jobs/{jobId:int}/pdf-status")]
+        public IActionResult GetIhmPdfStatus(int jobId)
+        {
+            var outputPdfPath = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "wwwroot",
+                "reports",
+                "ihm",
+                jobId.ToString(),
+                "ihm-report.pdf"
+            );
+
+            if (IhmPdfJobs.TryGetValue(jobId, out var state))
+            {
+                return Ok(new
+                {
+                    status = state.Status,
+                    error = state.Error,
+                    filePath = System.IO.File.Exists(outputPdfPath)
+                        ? $"/reports/ihm/{jobId}/ihm-report.pdf"
+                        : null
+                });
+            }
 
             return Ok(new
             {
-                message = "IHM report generated successfully.",
-                cached = false,
-                filePath = $"/reports/ihm/{jobId}/ihm-report.pdf",
-                fileUrl = $"{Request.Scheme}://{Request.Host}/reports/ihm/{jobId}/ihm-report.pdf"
+                status = System.IO.File.Exists(outputPdfPath) ? "completed" : "failed",
+                filePath = System.IO.File.Exists(outputPdfPath)
+                    ? $"/reports/ihm/{jobId}/ihm-report.pdf"
+                    : null
             });
         }
 

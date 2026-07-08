@@ -1,6 +1,9 @@
 ﻿import json
 import sys
 import traceback
+import os
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -267,7 +270,15 @@ def main():
         with log_path.open("a", encoding="utf-8") as log_file:
             log_file.write(line + "\n")
             log_file.flush()
-
+    @contextmanager
+    def timed_stage(name):
+        started = time.perf_counter()
+        log_stage(f"START {name}")
+        try:
+            yield
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            log_stage(f"END {name} elapsed_ms={elapsed_ms}")
     log_path.write_text("", encoding="utf-8")
     log_stage(f"START IHM PDF generation. input={input_json}, output={output_pdf}")
 
@@ -558,7 +569,8 @@ def main():
         if hazardous_materials_page_index is not None and page_index == hazardous_materials_page_index:
             mark_section("hazardousMaterials")
             log_stage("Generating hazardous materials pages")
-            hazardous_pages = make_hazardous_materials_a3_page(data)
+            with timed_stage("Hazardous Materials generation"):
+                hazardous_pages = make_hazardous_materials_a3_page(data)
 
             if isinstance(hazardous_pages, list):
                 for hazardous_page in hazardous_pages:
@@ -741,11 +753,12 @@ def main():
                 )
             add_page(page, page_index, update_footer=True)
             log_stage("Generating Appendix 4 layout pages")
-            appendix_four_pages = make_appendix_four_location_plan_pages(
-                page_number=154,
-                job_id=job_id,
-                data=data
-            )
+            with timed_stage("Appendix 4 generation"):
+                appendix_four_pages = make_appendix_four_location_plan_pages(
+                    page_number=154,
+                    job_id=job_id,
+                    data=data
+                )
 
             for index, appendix_four_page in enumerate(appendix_four_pages):
                 if index == 0:
@@ -1046,11 +1059,15 @@ def main():
             pass
 
     log_stage("Writing final PDF file")
+    write_started = time.perf_counter()
 
-    with open(output_pdf, "wb") as f:
+    temp_output_pdf = output_pdf.with_suffix(output_pdf.suffix + ".tmp")
+    with open(temp_output_pdf, "wb") as f:
         writer.write(f)
 
-    log_stage("COMPLETED IHM PDF generation successfully")
+    os.replace(temp_output_pdf, output_pdf)
+
+    log_stage(f"Final PDF writing completed elapsed_ms={int((time.perf_counter() - write_started) * 1000)}")
 
 
 if __name__ == "__main__":
