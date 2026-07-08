@@ -139,6 +139,12 @@ namespace Survey_Certification_App.Models.Survey
 
         [MaxLength(500)]
         public string? Notes { get; set; }
+        [MaxLength(100)]
+        public string? Source { get; set; }
+
+        public bool SuppressRender { get; set; }
+
+        public bool IsManualForExistingImage { get; set; }
 
         public int CreatedByUserId { get; set; }
 

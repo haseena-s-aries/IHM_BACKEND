@@ -242,6 +242,8 @@ def detect_existing_sample_text_markings(image_path, expected_labels=None):
                             "label": label,
                             "xPercent": ((x1 + x2) / 2) / image_w,
                             "yPercent": ((y1 + y2) / 2) / image_h,
+                            "widthPercent": (x2 - x1) / image_w,
+                            "heightPercent": (y2 - y1) / image_h,
                             "source": "existing-image",
                         }
 
@@ -393,6 +395,8 @@ def detect_existing_blue_sample_markings(image_path):
                 "label": label,
                 "xPercent": center_x / image_w,
                 "yPercent": point_y / image_h,
+                "widthPercent": w / image_w,
+                "heightPercent": h / image_h,
                 "source": "existing-image",
             })
 
@@ -402,6 +406,9 @@ def dedupe_latest_markers(markers):
     latest = {}
 
     for marker in markers:
+        if marker.get("suppressRender") or marker.get("SuppressRender"):
+            continue
+
         label = normalize_sample_label(marker_label(marker))
         image_path = normalize_web_path(marker_image_path(marker))
         if not label or not image_path:
@@ -413,7 +420,16 @@ def dedupe_latest_markers(markers):
         existing = latest.get(key)
         existing_id = int(existing.get("id") or existing.get("Id") or 0) if existing else -1
 
-        if existing is None or marker_id >= existing_id:
+        existing_source = str((existing or {}).get("source") or (existing or {}).get("Source") or "").strip().lower()
+        marker_source = str(marker.get("source") or marker.get("Source") or "").strip().lower()
+
+        if existing is None:
+            latest[key] = marker
+        elif existing_source == "existing-image":
+            continue
+        elif marker_source == "existing-image":
+            latest[key] = marker
+        elif marker_id >= existing_id:
             latest[key] = marker
 
     return list(latest.values())
@@ -440,26 +456,122 @@ def wrap_pil_text(draw, text, font, max_width):
         lines.append(current)
 
     return lines or [""]
-def erase_existing_blue_markings(image):
+def erase_existing_blue_markings(image, protected_markers=None):
     arr = np.array(image.convert("RGB"))
+    image_h, image_w = arr.shape[:2]
 
-    red = arr[:, :, 0]
-    green = arr[:, :, 1]
-    blue = arr[:, :, 2]
+    red = arr[:, :, 0].astype(np.int16)
+    green = arr[:, :, 1].astype(np.int16)
+    blue = arr[:, :, 2].astype(np.int16)
 
-    mask = (
-    (blue > 105) &
-    (red < 150) &
-    (green < 170) &
-    ((blue - red) > 30) &
-    ((blue - green) > 15)
+    # Strict marker-blue mask. Avoid room fills, black text, ship outline, and pale grid.
+    strong_blue_mask = (
+        (blue > 140) &
+        (red < 110) &
+        (green < 135) &
+        ((blue - red) > 55) &
+        ((blue - green) > 35)
+    )
+
+    # Catch only anti-aliased edge pixels that are directly touching strong marker blue.
+    edge_blue_mask = (
+        (blue > 115) &
+        (red < 150) &
+        (green < 165) &
+        ((blue - red) > 35) &
+        ((blue - green) > 22)
+    )
+
+    strong_blue_mask_u8 = strong_blue_mask.astype(np.uint8) * 255
+    edge_near_strong = cv2.dilate(
+        strong_blue_mask_u8,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1
+    ) > 0
+
+    blue_mask = (
+        strong_blue_mask |
+        (edge_blue_mask & edge_near_strong)
     ).astype(np.uint8) * 255
 
-    kernel = np.ones((2, 2), np.uint8)
-    mask = cv2.dilate(mask, kernel, iterations=1)
+    # Use connected components only for protecting OCR-current markers.
+    connect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    connected_mask = cv2.dilate(blue_mask, connect_kernel, iterations=1)
 
-    cleaned = cv2.inpaint(arr, mask, 2, cv2.INPAINT_TELEA)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        connected_mask,
+        connectivity=8
+    )
+
+    protected_mask = np.zeros_like(blue_mask)
+
+    for marker in protected_markers or []:
+        px = int(percent_to_unit(marker.get("xPercent") or marker.get("XPercent")) * image_w)
+        py = int(percent_to_unit(marker.get("yPercent") or marker.get("YPercent")) * image_h)
+
+        px = max(0, min(px, image_w - 1))
+        py = max(0, min(py, image_h - 1))
+
+        # OCR coordinate is label/text location. Protect only nearby blue component.
+        search_radius_x = 130
+        search_radius_y = 90
+
+        x1 = max(0, px - search_radius_x)
+        y1 = max(0, py - search_radius_y)
+        x2 = min(image_w, px + search_radius_x)
+        y2 = min(image_h, py + search_radius_y)
+
+        nearby = labels[y1:y2, x1:x2]
+        nearby_ids = [
+            int(v)
+            for v in np.unique(nearby)
+            if int(v) != 0
+        ]
+
+        if not nearby_ids:
+            continue
+
+        component_id = max(
+            nearby_ids,
+            key=lambda cid: stats[cid, cv2.CC_STAT_AREA]
+        )
+
+        component_area = stats[component_id, cv2.CC_STAT_AREA]
+        if component_area > image_w * image_h * 0.03:
+            continue
+
+        component_mask = (labels == component_id).astype(np.uint8) * 255
+        protected_mask = cv2.bitwise_or(
+            protected_mask,
+            cv2.bitwise_and(blue_mask, component_mask)
+        )
+
+    erase_mask = cv2.bitwise_and(blue_mask, cv2.bitwise_not(protected_mask))
+
+    # Small expansion removes anti-aliasing but avoids deleting grid/room boundaries.
+    erase_mask = cv2.dilate(
+        erase_mask,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1
+    )
+
+    # Smooth mask edges before inpaint to avoid rectangular/white artifacts.
+    erase_mask = cv2.GaussianBlur(erase_mask, (3, 3), 0)
+    erase_mask = (erase_mask > 20).astype(np.uint8) * 255
+
+    if cv2.countNonZero(erase_mask) == 0:
+        return Image.fromarray(arr.astype(np.uint8))
+
+    # TELEA generally blends thin blue lines better than white fill.
+    cleaned = cv2.inpaint(
+        arr.astype(np.uint8),
+        erase_mask,
+        3,
+        cv2.INPAINT_TELEA
+    )
+
     return Image.fromarray(cleaned)
+
 def percent_to_unit(value):
     try:
         number = float(value or 0)
@@ -472,7 +584,18 @@ def percent_to_unit(value):
     return max(0.0, min(number, 1.0))
 def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bottom_dot_offset=0):
     base = Image.open(source_path).convert("RGB")
-    base = erase_existing_blue_markings(base)
+
+    protected_markers = [
+        item["marker"]
+        for item in marker_items
+        if (
+            "ocr-existing-label" in str(item["marker"].get("notes") or item["marker"].get("Notes") or "").strip().lower()
+            or "manual-for-existing-image" in str(item["marker"].get("notes") or item["marker"].get("Notes") or "").strip().lower()
+            or str(item["marker"].get("source") or item["marker"].get("Source") or "").strip().lower() == "existing-image"
+        )
+    ]
+
+    base = erase_existing_blue_markings(base, protected_markers)
     image_w, image_h = base.size
 
     outer_pad = 220
@@ -509,8 +632,62 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         marker = item["marker"]
         label = item["label"]
 
+        notes = str(marker.get("notes") or marker.get("Notes") or "").strip().lower()
+        marker_source = str(marker.get("source") or marker.get("Source") or "").strip().lower()
+        is_existing_label = (
+            "ocr-existing-label" in notes
+            or "manual-for-existing-image" in notes
+            or marker_source == "existing-image"
+        )
+
         x = outer_pad + percent_to_unit(marker.get("xPercent") or marker.get("XPercent")) * image_w
         y = outer_pad + percent_to_unit(marker.get("yPercent") or marker.get("YPercent")) * image_h
+
+        if is_existing_label:
+            max_label_w = 210
+            lines = wrap_pil_text(draw, label, font, max_label_w - 14)
+            line_h = 18
+
+            label_w = max(
+                90,
+                min(
+                    max_label_w,
+                    max(draw.textbbox((0, 0), line, font=font)[2] for line in lines) + 14
+                )
+            )
+            label_h = max(label_h_base, len(lines) * line_h + 10)
+
+            box_x = x - label_w / 2
+            box_y = y - label_h / 2
+
+            box_x = max(margin, min(box_x, canvas_img.size[0] - label_w - margin))
+            box_y = max(margin, min(box_y, canvas_img.size[1] - label_h - margin))
+
+            # OCR x/y is the existing label text position. Replace text only.
+            # Do not redraw dot, leader line, or full label border.
+            
+            text_clear_pad_x = max(label_w / 2, 55)
+            text_clear_pad_y = max(label_h / 2, 18)
+
+            clear_x1 = max(layout_x, x - text_clear_pad_x)
+            clear_y1 = max(layout_y, y - text_clear_pad_y)
+            clear_x2 = min(layout_right, x + text_clear_pad_x)
+            clear_y2 = min(layout_bottom, y + text_clear_pad_y)
+
+            draw.rectangle(
+                [clear_x1, clear_y1, clear_x2, clear_y2],
+                outline=blue,
+                fill=white,
+                width=2,
+            )
+
+            text_y = clear_y1 + 4
+            for line in lines:
+                draw.text((clear_x1 + 5, text_y), line, fill=blue, font=font)
+                text_y += line_h
+
+            used_boxes.append((clear_x1, clear_y1, clear_x2, clear_y2))
+            continue
 
 
         max_label_w = 210
@@ -771,7 +948,10 @@ def build_i2_hazard_layout_images(data):
                         "imagePath": layout_source,
                         "xPercent": ocr_item["xPercent"],
                         "yPercent": ocr_item["yPercent"],
+                        "widthPercent": ocr_item.get("widthPercent"),
+                        "heightPercent": ocr_item.get("heightPercent"),
                         "source": "existing-image",
+                        "notes": "ocr-existing-label",
                     },
                     "label": label,
                 })

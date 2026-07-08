@@ -189,6 +189,31 @@ using (var scope = app.Services.CreateScope())
             CREATE INDEX IX_UserNotifications_UserId_IsRead_CreatedAt
                 ON dbo.UserNotifications(UserId, IsRead, CreatedAt DESC);
         END
+
+        IF OBJECT_ID('dbo.IhmImageMarkers', 'U') IS NOT NULL
+        BEGIN
+            IF COL_LENGTH('dbo.IhmImageMarkers', 'Source') IS NULL
+            BEGIN
+                ALTER TABLE dbo.IhmImageMarkers
+                    ADD [Source] NVARCHAR(100) NULL;
+            END
+
+            IF COL_LENGTH('dbo.IhmImageMarkers', 'SuppressRender') IS NULL
+            BEGIN
+                ALTER TABLE dbo.IhmImageMarkers
+                    ADD [SuppressRender] BIT NOT NULL
+                        CONSTRAINT DF_IhmImageMarkers_SuppressRender DEFAULT (0)
+                        WITH VALUES;
+            END
+
+            IF COL_LENGTH('dbo.IhmImageMarkers', 'IsManualForExistingImage') IS NULL
+            BEGIN
+                ALTER TABLE dbo.IhmImageMarkers
+                    ADD [IsManualForExistingImage] BIT NOT NULL
+                        CONSTRAINT DF_IhmImageMarkers_IsManualForExistingImage DEFAULT (0)
+                        WITH VALUES;
+            END
+        END
         """);
 }
 

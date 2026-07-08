@@ -65,6 +65,8 @@ namespace Survey_Certification_App.Models.Survey
         public SurveyJobStatus Status { get; set; } = SurveyJobStatus.Draft;
 
         public int CreatedByUserId { get; set; }
+        public int? AssignedUserId { get; set; }
+        public int? AssignedManagerId { get; set; }
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

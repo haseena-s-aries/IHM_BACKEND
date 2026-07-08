@@ -123,7 +123,7 @@ namespace Survey_Certification_App.Controllers
                 return Unauthorized(new { message = "Invalid Email Id" });
 
             if (user.IsRejected)
-                return Unauthorized(new { message = "Account Rejected" });
+                return Unauthorized(new { message = "Your account has been rejected. Please contact admin." });
 
             bool isPasswordValid;
 
@@ -143,7 +143,7 @@ namespace Survey_Certification_App.Controllers
                 return Unauthorized(new { message = "Invalid Password" });
 
             if (!user.IsApproved)
-                return Unauthorized(new { message = "Admin Approval Required" });
+                return Unauthorized(new { message = "Your account is pending admin approval." });
 
             var token = GenerateJwtToken(user);
 
@@ -308,26 +308,24 @@ namespace Survey_Certification_App.Controllers
                 return BadRequest("Email already registered");
             }
 
-            // 👉 Only allow basic role on registration (like "User")
+            var requestedRole = string.IsNullOrWhiteSpace(dto.Role) ? "User" : dto.Role.Trim();
+
             var user = new User
             {
                 FullName = dto.FullName,
                 Email = dto.Email,
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password),
                 IsOtpVerified = true,
-                IsApproved = dto.Role == "User", // ✅ If role is "User", auto-approve
-                Role = dto.Role == "User" ? "User" : "Pending",
-                RequestedRole = dto.Role != "User" ? dto.Role : null
+                IsApproved = false,
+                IsRejected = false,
+                Role = "Pending",
+                RequestedRole = requestedRole
             };
 
             await _db.users.AddAsync(user);
             await _db.SaveChangesAsync();
 
-            // ✅ Return different messages based on role
-            if (dto.Role == "User")
-                return Ok(new { message = "Account created successfully!" });
-            else
-                return Ok(new { message = "Account created. Awaiting admin approval." });
+            return Ok(new { message = "Registration successful. Your account is pending admin approval." });
         }
 
 
@@ -375,6 +373,7 @@ namespace Survey_Certification_App.Controllers
                 user.Role = user.RequestedRole;
                 user.RequestedRole = null;
                 user.IsApproved = true;
+                user.IsRejected = false;
                 user.ApprovedAt = DateTime.UtcNow;
 
                 await _db.SaveChangesAsync();
@@ -674,6 +673,24 @@ namespace Survey_Certification_App.Controllers
                 .ToListAsync();
 
             return Ok(surveyors);
+        }
+
+        [HttpGet("managers")]
+        public async Task<IActionResult> GetManagers()
+        {
+            var managers = await _db.users
+                .Where(u => u.IsApproved == true && u.Role == "Manager")
+                .OrderBy(u => u.FullName)
+                .Select(u => new
+                {
+                    id = u.Id,
+                    fullName = u.FullName,
+                    email = u.Email,
+                    role = u.Role
+                })
+                .ToListAsync();
+
+            return Ok(managers);
         }
 
 
