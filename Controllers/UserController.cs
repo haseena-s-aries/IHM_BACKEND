@@ -175,7 +175,7 @@ namespace Survey_Certification_App.Controllers
             .AnyAsync(u => u.Email.ToLower() == email);
 
             if (registeredUserExists)
-               return BadRequest(new { message = "Email already exists. Please login instead." });
+                return BadRequest(new { message = "Email already exists. Please login instead." });
 
             var otp = new Random().Next(100000, 999999).ToString();
 

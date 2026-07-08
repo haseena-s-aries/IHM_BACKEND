@@ -1,5 +1,7 @@
 ﻿import json
 import sys
+import traceback
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from reportlab.pdfbase.ttfonts import TTFont
@@ -104,9 +106,7 @@ def should_update_template_header(
 
     return True
 
-def add_total_page_count_to_cover(writer):
-    total_pages = max(len(writer.pages) - 1, 0)
-
+def add_total_page_count_to_cover(writer, total_pages):
     if len(writer.pages) == 0:
         return writer
 
@@ -148,18 +148,52 @@ def add_total_page_count_to_cover(writer):
 
     return new_writer
 
-def replace_contents_placeholder(writer, insert_index, contents_pages):
+def replace_contents_placeholder(writer, footer_flags, insert_index, contents_pages):
     old_pages = list(writer.pages)
     new_writer = PdfWriter()
+    new_footer_flags = []
 
     for index, page in enumerate(old_pages):
         if index == insert_index:
             for contents_page in contents_pages:
                 new_writer.add_page(contents_page)
+                new_footer_flags.append(True)
         else:
             new_writer.add_page(page)
+            new_footer_flags.append(
+                footer_flags[index] if index < len(footer_flags) else False
+            )
 
-    return new_writer
+    return new_writer, new_footer_flags
+
+def renumber_visible_footers(writer, data, footer_flags):
+    old_pages = list(writer.pages)
+    new_writer = PdfWriter()
+    company_name = get_company_name(data)
+
+    for index, page in enumerate(old_pages):
+        # Cover page is excluded from page numbering.
+        if index == 0:
+            new_writer.add_page(page)
+            continue
+
+        page_no = index
+        show_footer = (
+            index < len(footer_flags)
+            and footer_flags[index]
+        )
+
+        if show_footer:
+            page = replace_template_footer(
+                page,
+                company_name,
+                page_no
+            )
+
+        new_writer.add_page(page)
+
+    return new_writer, max(len(old_pages) - 1, 0)
+
 def update_template_header(
     page,
     data,
@@ -223,8 +257,23 @@ def main():
     input_json = Path(sys.argv[1])
     output_pdf = Path(sys.argv[2])
 
+    log_path = output_pdf.parent / "generator.log"
+
+    def log_stage(message):
+        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        line = f"{datetime.now():%Y-%m-%d %H:%M:%S} | {message}"
+        print(line, flush=True)
+
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(line + "\n")
+            log_file.flush()
+
+    log_path.write_text("", encoding="utf-8")
+    log_stage(f"START IHM PDF generation. input={input_json}, output={output_pdf}")
+
     raw_data = json.loads(input_json.read_text(encoding="utf-8"))
     data = normalize_keys(raw_data)
+    log_stage("Loaded input JSON and normalized keys")
     job = data.get("job") or {}
     job_id = job.get("id") or data.get("jobId") or data.get("id")
 
@@ -236,7 +285,7 @@ def main():
         sys.exit(1)
 
     template_reader = PdfReader(str(template_pdf))
-
+    log_stage(f"Loaded template PDF. template_pages={len(template_reader.pages)}")
     text_cache_path = template_pdf.with_suffix(".text-cache.json")
     template_stat = template_pdf.stat()
     template_key = f"{template_stat.st_size}:{template_stat.st_mtime_ns}"
@@ -255,6 +304,7 @@ def main():
             page_texts = None
 
     if not isinstance(page_texts, list):
+        log_stage("Extracting template page texts")
         page_texts = extract_page_texts(template_reader)
 
         text_cache_path.write_text(
@@ -264,6 +314,7 @@ def main():
             }),
             encoding="utf-8"
         )
+        log_stage("Template page text extraction completed and cache written")
     contents_page_index = find_page_by_text_after(
         page_texts,
         "CONTENTS",
@@ -441,6 +492,8 @@ def main():
         start_page=appendix_seven_search_start
     )
     writer = PdfWriter()
+    log_stage("Started building PDF pages")
+    footer_flags = []
     display_page_number = 0
 
     section_pages = {}
@@ -451,37 +504,34 @@ def main():
     def add_page(page, template_page_index=None, update_footer=False, generated_footer=False):
         nonlocal display_page_number
 
-        # Skip only cover page from numbering
-        if template_page_index != 0:
-            display_page_number += 1
+        should_show_footer = False
 
         if update_footer and template_page_index is not None:
-            page = update_template_footer(
-                page,
-                data,
-                template_page_index,
-                display_page_number,
-                see_below_attachment_page_index,
-                appendix_six_page_index,
-                appendix_seven_page_index
+            should_show_footer = (
+                template_page_index != 0
+                and should_update_template_header(
+                    template_page_index,
+                    see_below_attachment_page_index,
+                    appendix_six_page_index,
+                    appendix_seven_page_index
+                )
             )
 
         if generated_footer:
-            page = replace_template_footer(
-                page,
-                get_company_name(data),
-                display_page_number
-            )
+            should_show_footer = True
 
         writer.add_page(page)
+        footer_flags.append(should_show_footer)
 
     def mark_section(key):
         if key not in section_pages:
-            section_pages[key] = display_page_number + 1
+            section_pages[key] = len(writer.pages)
 
     revision_next_index = None
     skip_template_pages_after_hazardous = 0
     for page_index, page in enumerate(template_reader.pages):
+        if page_index % 25 == 0:
+            log_stage(f"Processing template page index={page_index}")
         if skip_template_pages_after_hazardous > 0:
             skip_template_pages_after_hazardous -= 1
             continue
@@ -507,6 +557,7 @@ def main():
 
         if hazardous_materials_page_index is not None and page_index == hazardous_materials_page_index:
             mark_section("hazardousMaterials")
+            log_stage("Generating hazardous materials pages")
             hazardous_pages = make_hazardous_materials_a3_page(data)
 
             if isinstance(hazardous_pages, list):
@@ -519,6 +570,7 @@ def main():
             continue
         if collection_information_page_index is not None and page_index == collection_information_page_index:
             mark_section("collectionInformation")
+            log_stage("Generating collection information pages")
             collection_pages = make_collection_information_pages(page_width, page_height, data)
 
             if collection_pages:
@@ -545,6 +597,7 @@ def main():
 
         if visual_sampling_check_plan_page_index is not None and page_index == visual_sampling_check_plan_page_index:
             mark_section("visualSamplingPlan")
+            log_stage("Generating visual sampling check plan pages")
             visual_pages = make_visual_sampling_check_plan_pages(page_width, page_height, data)
 
             if visual_pages:
@@ -595,6 +648,7 @@ def main():
                     appendix_seven_page_index
                 )
             add_page(page, page_index, update_footer=True)
+            log_stage("Generating OHS risk assessment pages")
             for ohs_page in make_ohs_risk_assessment_pages(data):
                 add_page(ohs_page)
             continue
@@ -604,6 +658,7 @@ def main():
 
         if appendix_one_page_index is not None and page_index == appendix_one_page_index:
             mark_section("appendixOne")
+            log_stage("Generating Appendix 1 pages")
             appendix_pages = make_appendix_one_results_pages(page_width, page_height, data)
 
             if appendix_pages:
@@ -634,7 +689,7 @@ def main():
                     appendix_seven_page_index
                 )
             add_page(page, page_index, update_footer=True)
-
+            log_stage("Generating Appendix 2 attachment pages")
             attachment_pages = make_appendix_two_attachment_pages(page_width, page_height, data)
 
             for attachment_page in attachment_pages:
@@ -659,7 +714,7 @@ def main():
                     appendix_seven_page_index
                 )
             add_page(page, page_index, update_footer=True)
-
+            log_stage("Generating Appendix 3 sampling photo pages")
             appendix_three_pages = make_appendix_three_sampling_photo_pages(page_width, page_height, data)
 
             for appendix_three_page in appendix_three_pages:
@@ -685,7 +740,7 @@ def main():
                     appendix_seven_page_index
                 )
             add_page(page, page_index, update_footer=True)
-
+            log_stage("Generating Appendix 4 layout pages")
             appendix_four_pages = make_appendix_four_location_plan_pages(
                 page_number=154,
                 job_id=job_id,
@@ -706,6 +761,7 @@ def main():
             continue
         if appendix_five_page_index is not None and page_index == appendix_five_page_index:
             mark_section("appendixFive")
+            log_stage("Generating Appendix 5 vessel document pages")
             appendix_five_pages = make_appendix_five_vessel_document_pages(page_width, page_height, data)
 
             if appendix_five_pages:
@@ -754,6 +810,7 @@ def main():
 
         if appendix_seven_page_index is not None and page_index == appendix_seven_page_index:
             mark_section("appendixSeven")
+            log_stage("Generating Appendix 7 certificate pages")
             appendix_seven_pages = make_appendix_seven_certificate_pages(page_width, page_height, data)
             page = update_template_header(
                     page,
@@ -866,15 +923,16 @@ def main():
             custom_groups[appendix_no] = (
                 row.get("appendixTitle") or "ADDITIONAL DOCUMENTS"
             )
+    log_stage("Generating custom appendix pages")
     custom_pages = make_custom_appendix_pages(
     default_page_width,
     default_page_height,
     data,
-    start_page_number=display_page_number + 1
+    start_page_number=len(writer.pages)
     )
 
     custom_appendix_page_map = {}
-    custom_start_page = display_page_number + 1
+    custom_start_page = len(writer.pages)
     search_from_index = 0
 
     # Find each appendix title page from the actual generated output.
@@ -903,8 +961,15 @@ def main():
                 custom_start_page + search_from_index
             )
 
-    for custom_page in custom_pages:
-        add_page(custom_page)
+    custom_title_page_indexes = set(custom_appendix_page_map.values())
+
+    for custom_page_index, custom_page in enumerate(custom_pages):
+        actual_page_number = custom_start_page + custom_page_index
+
+        if actual_page_number in custom_title_page_indexes:
+            add_page(custom_page, generated_footer=True)
+        else:
+            add_page(custom_page)
 
     contents_rows = [
     {"number": "1", "title": "INTRODUCTION", "pageNo": section_pages.get("introduction", "-")},
@@ -938,6 +1003,7 @@ def main():
         })
 
     if contents_insert_index is not None:
+        log_stage("Generating contents/index pages")
         contents_pages = make_contents_pages(
             contents_page_width or default_page_width,
             contents_page_height or default_page_height,
@@ -945,12 +1011,32 @@ def main():
             contents_rows
         )
 
-        writer = replace_contents_placeholder(
+        contents_extra_pages = max(len(contents_pages) - 1, 0)
+
+        if contents_extra_pages:
+            for row in contents_rows:
+                page_no = row.get("pageNo")
+
+                if isinstance(page_no, int) and page_no > contents_insert_index:
+                    row["pageNo"] = page_no + contents_extra_pages
+
+            contents_pages = make_contents_pages(
+                contents_page_width or default_page_width,
+                contents_page_height or default_page_height,
+                data,
+                contents_rows
+            )
+        
+
+        writer, footer_flags = replace_contents_placeholder(
             writer,
+            footer_flags,
             contents_insert_index,
             contents_pages
         )
-    writer = add_total_page_count_to_cover(writer)
+    log_stage("Renumbering visible footers")
+    writer, visible_total_pages = renumber_visible_footers(writer, data, footer_flags)
+    writer = add_total_page_count_to_cover(writer, visible_total_pages)
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
     for page in writer.pages:
@@ -959,9 +1045,31 @@ def main():
         except Exception:
             pass
 
+    log_stage("Writing final PDF file")
+
     with open(output_pdf, "wb") as f:
         writer.write(f)
 
+    log_stage("COMPLETED IHM PDF generation successfully")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        error_text = traceback.format_exc()
+        print(error_text, file=sys.stderr, flush=True)
+
+        try:
+            if len(sys.argv) >= 3:
+                output_pdf = Path(sys.argv[2])
+                log_path = output_pdf.parent / "generator.log"
+                output_pdf.parent.mkdir(parents=True, exist_ok=True)
+
+                with log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} | ERROR\n")
+                    log_file.write(error_text + "\n")
+        except Exception:
+            pass
+
+        raise

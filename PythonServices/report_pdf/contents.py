@@ -111,8 +111,7 @@ def make_contents_pages(page_width, page_height, data, rows):
                 page_no_text=f"Page | {page_number}"
             )
 
-            _draw_center_title(c, page_width)
-            y = START_Y
+            y = TITLE_Y
 
         y = _draw_toc_row(
             c,

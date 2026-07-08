@@ -1535,6 +1535,9 @@ namespace Survey_Certification_App.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
 
+                    b.Property<bool>("IsManualForExistingImage")
+                        .HasColumnType("bit");
+
                     b.Property<string>("MarkerLabel")
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
@@ -1542,6 +1545,13 @@ namespace Survey_Certification_App.Migrations
                     b.Property<string>("Notes")
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<bool>("SuppressRender")
+                        .HasColumnType("bit");
 
                     b.Property<int>("SurveyJobId")
                         .HasColumnType("int");
@@ -1660,6 +1670,12 @@ namespace Survey_Certification_App.Migrations
                         .HasColumnType("int");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("AssignedManagerId")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("AssignedUserId")
+                        .HasColumnType("int");
 
                     b.Property<string>("AuditAddress")
                         .HasColumnType("nvarchar(max)");
