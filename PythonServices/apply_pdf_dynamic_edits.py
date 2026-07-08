@@ -624,8 +624,9 @@ def find_heading_from(
     return None
 
 
-def build_sequential_contents_rows(pages, data):
-    page_texts = extract_normalized_page_texts(pages)
+def build_sequential_contents_rows(pages, data, page_texts=None):
+    if page_texts is None:
+        page_texts = extract_normalized_page_texts(pages)
     rows = []
     search_from = 1
 
@@ -797,9 +798,16 @@ def rebuild_contents(pages, data):
             + pages_without_contents[contents_index:]
         )
 
+        shifted_page_texts = (
+            page_texts[:contents_index]
+            + [""] * contents_count
+            + page_texts[contents_end_index:]
+        )
+
         rows = build_sequential_contents_rows(
             shifted_pages,
             data,
+            shifted_page_texts,
         )
 
         generated = make_contents_pages(
@@ -900,8 +908,9 @@ def main():
         data.get("reportInfo") or {}
     ).get("companyName")
 
-    final_header_footer_policy = build_header_footer_policy(pages,data)
+    final_header_footer_policy = build_header_footer_policy(pages, data)
     renumbered = []
+    visible_page_number = 0
 
     for index, page in enumerate(pages):
         # Cover page: do not display or count as page 1.
@@ -909,26 +918,22 @@ def main():
             renumbered.append(page)
             continue
 
-        # Physical position after additions/removals.
-        display_page_number = index
-
         if final_header_footer_policy(index):
+            visible_page_number += 1
             page = redraw_final_footer(
                 page,
                 company_name,
-                display_page_number,
+                visible_page_number,
             )
-        else:
-            # Remove any old footer from intentionally skipped pages.
-            pass
 
         renumbered.append(page)
 
     # Cover is not included in displayed page count.
+        # Cover is not included in displayed page count.
     if renumbered:
         renumbered[0] = update_cover_total(
             renumbered[0],
-            max(len(renumbered) - 1, 0)
+            visible_page_number
         )
 
     writer = PdfWriter()

@@ -6,6 +6,10 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Processing;
+using ImageSharpImage = SixLabors.ImageSharp.Image;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
@@ -580,7 +584,9 @@ namespace Survey_Certification_App.Controllers
         [HttpPost("jobs/{jobId:int}/import-excel")]
         public async Task<IActionResult> ImportExcel(int jobId, IFormFile file)
         {
-            var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
+            try
+            {
+                var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
 
             if (!jobExists)
                 return NotFound("Survey job not found.");
@@ -590,10 +596,13 @@ namespace Survey_Certification_App.Controllers
 
             var extension = Path.GetExtension(file.FileName).ToLower();
 
-            if (extension != ".xlsx" && extension != ".xls")
-                return BadRequest("Only Excel files are allowed.");
+                if (extension == ".xls")
+                    return BadRequest("Old .xls files are not supported. Please save the Excel file as .xlsx and upload again.");
 
-            var uploadFolder = Path.Combine(
+                if (extension != ".xlsx")
+                    return BadRequest("Only .xlsx Excel files are allowed.");
+
+                var uploadFolder = Path.Combine(
                 Directory.GetCurrentDirectory(),
                 "wwwroot",
                 "uploads",
@@ -758,6 +767,21 @@ namespace Survey_Certification_App.Controllers
                 areaCount = parsed.Areas.Count,
                 checkpointCount = parsed.Areas.Sum(x => x.Checkpoints.Count)
             });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("========================================");
+                Console.WriteLine("IMPORT EXCEL EXCEPTION");
+                Console.WriteLine(ex.ToString());
+                Console.WriteLine("========================================");
+
+                return StatusCode(500, new
+                {
+                    Message = ex.Message,
+                    InnerException = ex.InnerException?.Message,
+                    StackTrace = ex.ToString()
+                });
+            }
         }
 
         [HttpPut("checkpoints/{checkpointId:int}/procedure")]
@@ -2262,63 +2286,29 @@ namespace Survey_Certification_App.Controllers
             if (process.ExitCode != 0)
                 throw new InvalidOperationException("PDF to image conversion failed: " + error);
         }
-        private static Task SaveCompressedPhotoAsync(
-  IFormFile file,
-  string outputPath)
+        private static async Task SaveCompressedPhotoAsync(IFormFile file, string outputPath)
         {
-            using var inputStream = file.OpenReadStream();
-            using var sourceImage = System.Drawing.Image.FromStream(
-                inputStream,
-                useEmbeddedColorManagement: true,
-                validateImageData: true);
+            await using var inputStream = file.OpenReadStream();
 
-            AutoOrientImage(sourceImage);
+            using var image = await ImageSharpImage.LoadAsync(inputStream);
 
-            const int maxWidth = 1800;
-            const int maxHeight = 1800;
-
-            var scale = Math.Min(
-                1d,
-                Math.Min(
-                    (double)maxWidth / sourceImage.Width,
-                    (double)maxHeight / sourceImage.Height));
-
-            var width = Math.Max(1, (int)Math.Round(sourceImage.Width * scale));
-            var height = Math.Max(1, (int)Math.Round(sourceImage.Height * scale));
-
-            using var resizedImage = new Bitmap(
-                width,
-                height,
-                PixelFormat.Format24bppRgb);
-
-            using (var graphics = Graphics.FromImage(resizedImage))
+            image.Mutate(x =>
             {
-                graphics.Clear(Color.White);
-                graphics.CompositingQuality = CompositingQuality.HighSpeed;
-                graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                graphics.SmoothingMode = SmoothingMode.HighSpeed;
-                graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                x.AutoOrient();
+                x.Resize(new ResizeOptions
+                {
+                    Mode = ResizeMode.Max,
+                    Size = new SixLabors.ImageSharp.Size(1800, 1800)
+                });
+                x.BackgroundColor(SixLabors.ImageSharp.Color.White);
+            });
 
-                graphics.DrawImage(
-                    sourceImage,
-                    new Rectangle(0, 0, width, height));
-            }
+            var encoder = new JpegEncoder
+            {
+                Quality = 75
+            };
 
-            var jpegCodec = ImageCodecInfo.GetImageEncoders()
-                .First(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
-
-            using var encoderParameters = new EncoderParameters(1);
-
-            encoderParameters.Param[0] = new EncoderParameter(
-                System.Drawing.Imaging.Encoder.Quality,
-                75L);
-
-            resizedImage.Save(
-                outputPath,
-                jpegCodec,
-                encoderParameters);
-
-            return Task.CompletedTask;
+            await image.SaveAsJpegAsync(outputPath, encoder);
         }
 
         private static void AutoOrientImage(System.Drawing.Image image)
