@@ -78,5 +78,9 @@ namespace Survey_Certification_App.Models
         public decimal? DraughtMoulded { get; set; }
 
         public ICollection<SurveyJob> SurveyJobs { get; set; } = new List<SurveyJob>();
+
+        public int? ProjectId { get; set; }
+        public string? ProjectName { get; set; }
+        public int? CreatedByUserId { get; set; }
     }
 }

@@ -21,6 +21,8 @@ builder.Services.AddDbContext<ApplicationDbContext>(opts =>
 // ------------------------------------------------------
 // 1) Controllers
 // ------------------------------------------------------
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<Survey_Certification_App.Services.AccessScopeService>();
 builder.Services.AddControllers()
     .ConfigureApiBehaviorOptions(options =>
     {

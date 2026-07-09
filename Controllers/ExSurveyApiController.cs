@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.Models.Survey;
 using System.Security.Claims;
+using Survey_Certification_App.Services;
 
 namespace Survey_Certification_App.Controllers
 {
@@ -16,10 +17,12 @@ namespace Survey_Certification_App.Controllers
     public class ExSurveyApiController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
+        private readonly AccessScopeService _access;
 
-        public ExSurveyApiController(ApplicationDbContext db)
+        public ExSurveyApiController(ApplicationDbContext db, AccessScopeService access)
         {
             _db = db;
+            _access = access;
         }
 
         [HttpGet("jobs/{jobId:int}/summary")]
@@ -734,9 +737,10 @@ namespace Survey_Certification_App.Controllers
         }
 
         private Task<bool> IsExSurveyJobAsync(int jobId)
-        {
-            return _db.SurveyJobs.AnyAsync(x =>
-                x.Id == jobId && x.ModuleType == SurveyModuleType.ExSurvey);
+{
+            return _access
+                .FilterJobs(_db.SurveyJobs.AsQueryable())
+                .AnyAsync(x => x.Id == jobId && x.ModuleType == SurveyModuleType.ExSurvey);
         }
 
         private async Task EnsureDefaultChecklistQuestionsAsync()

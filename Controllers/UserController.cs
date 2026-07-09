@@ -45,7 +45,12 @@ namespace Survey_Certification_App.Controllers
         new Claim(ClaimTypes.Email, user.Email ?? ""),
         new Claim(ClaimTypes.Name, user.FullName ?? ""),
         new Claim(ClaimTypes.Role, user.Role ?? ""),
-        new Claim("role", user.Role ?? "")
+        new Claim("role", user.Role ?? ""),
+        new Claim("userId", user.Id.ToString()),
+        new Claim("projectId", user.ProjectId?.ToString() ?? ""),
+        new Claim("projectName", user.ProjectName ?? ""),
+        new Claim("roleId", user.RoleId?.ToString() ?? ""),
+        new Claim("roleName", user.RoleName ?? user.Role ?? "")
     };
 
             var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
@@ -84,6 +89,9 @@ namespace Survey_Certification_App.Controllers
                     FullName = "Static Admin",
                     Email = "admin@local.com",
                     Role = "Admin",
+                    RoleName = "Admin",
+                    ProjectId = null,
+                    ProjectName = "All Projects",
                     IsApproved = true,
                     PasswordHash = ""
                 };
@@ -99,7 +107,10 @@ namespace Survey_Certification_App.Controllers
                         id = staticAdmin.Id,
                         fullName = staticAdmin.FullName,
                         email = staticAdmin.Email,
-                        role = staticAdmin.Role
+                        role = staticAdmin.Role,
+                        projectId = staticAdmin.ProjectId,
+                        projectName = staticAdmin.ProjectName,
+                        roleName = staticAdmin.RoleName
                     }
                 });
             }
@@ -156,7 +167,11 @@ namespace Survey_Certification_App.Controllers
                     id = user.Id,
                     fullName = user.FullName,
                     email = user.Email,
-                    role = user.Role
+                    role = user.Role,
+                    projectId = user.ProjectId,
+                    projectName = user.ProjectName,
+                    roleId = user.RoleId,
+                    roleName = user.RoleName ?? user.Role
                 }
             });
         }
@@ -278,6 +293,33 @@ namespace Survey_Certification_App.Controllers
             return Ok(new { message = "OTP verified successfully" });
         }
 
+        [HttpGet("projects")]
+        public async Task<IActionResult> GetProjects()
+        {
+            var projects = await _db.Projects
+                .Where(x => x.IsActive)
+                .OrderBy(x => x.Name)
+                .Select(x => new { x.Id, x.Name, x.Code })
+                .ToListAsync();
+
+            return Ok(projects);
+        }
+
+        [HttpGet("projects/{projectId:int}/roles")]
+        public async Task<IActionResult> GetPublicRoles(int projectId)
+        {
+            var roles = await _db.ProjectRoles
+                .Where(x =>
+                    x.ProjectId == projectId &&
+                    x.IsPublicRegistrationAllowed &&
+                    x.RoleName != "Admin")
+                .OrderBy(x => x.RoleName)
+                .Select(x => new { x.Id, x.RoleName })
+                .ToListAsync();
+
+            return Ok(roles);
+        }
+
         // 🔹 User Registration API
         [HttpPost("register")]
         public async Task<IActionResult> Register([FromBody] CreateUserDto dto)
@@ -308,7 +350,22 @@ namespace Survey_Certification_App.Controllers
                 return BadRequest("Email already registered");
             }
 
-            var requestedRole = string.IsNullOrWhiteSpace(dto.Role) ? "User" : dto.Role.Trim();
+            var project = await _db.Projects.FirstOrDefaultAsync(x => x.Id == dto.ProjectId && x.IsActive);
+            if (project == null)
+                return BadRequest(new { message = "Invalid project selected." });
+
+            var role = await _db.ProjectRoles.FirstOrDefaultAsync(x =>
+                x.Id == dto.RoleId &&
+                x.ProjectId == dto.ProjectId &&
+                x.IsPublicRegistrationAllowed);
+
+            if (role == null)
+                return BadRequest(new { message = "Invalid role selected for this project." });
+
+            if (string.Equals(role.RoleName, "Admin", StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { message = "Admin cannot be created from public registration." });
+
+            var requestedRole = role.RoleName;
 
             var user = new User
             {
@@ -319,7 +376,11 @@ namespace Survey_Certification_App.Controllers
                 IsApproved = false,
                 IsRejected = false,
                 Role = "Pending",
-                RequestedRole = requestedRole
+                RequestedRole = requestedRole,
+                ProjectId = project.Id,
+                ProjectName = project.Name,
+                RoleId = role.Id,
+                RoleName = role.RoleName
             };
 
             await _db.users.AddAsync(user);
@@ -342,6 +403,10 @@ namespace Survey_Certification_App.Controllers
                         u.FullName,
                         u.Email,
                         u.RequestedRole,
+                        u.ProjectId,
+                        u.ProjectName,
+                        u.RoleId,
+                        u.RoleName,
 
                     })
                     .ToListAsync();
@@ -371,6 +436,7 @@ namespace Survey_Certification_App.Controllers
                     return BadRequest(new { message = "Requested role is missing." });
 
                 user.Role = user.RequestedRole;
+                user.RoleName = user.RequestedRole;
                 user.RequestedRole = null;
                 user.IsApproved = true;
                 user.IsRejected = false;

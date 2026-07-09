@@ -1,6 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Models;
 using Survey_Certification_App.Models.Survey;
+using Survey_Certification_App.Models.Access;
 
 namespace Survey_Certification_App.Data
 {
@@ -9,7 +10,9 @@ namespace Survey_Certification_App.Data
         public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options) { }
 
         public DbSet<User> users { get; set; }
-
+        public DbSet<Project> Projects { get; set; }
+        public DbSet<ProjectRole> ProjectRoles { get; set; }
+        public DbSet<ClientVesselMapping> ClientVesselMappings { get; set; }
         public DbSet<RecommendationModel> recommendationModels { get; set; }
 
 
@@ -286,6 +289,42 @@ namespace Survey_Certification_App.Data
                 entity.Property(x => x.HeightPercent).HasPrecision(9, 4);
                 entity.Property(x => x.MatchConfidence).HasPrecision(9, 4);
             });
+
+            modelBuilder.Entity<Project>()
+    .HasIndex(x => x.Code)
+    .IsUnique();
+
+            modelBuilder.Entity<ProjectRole>()
+                .HasIndex(x => new { x.ProjectId, x.RoleName })
+                .IsUnique();
+
+            modelBuilder.Entity<ClientVesselMapping>()
+                .HasIndex(x => new { x.UserId, x.VesselId })
+                .IsUnique();
+
+            modelBuilder.Entity<Project>().HasData(
+                new Project { Id = 1, Name = "IHM", Code = "IHM", IsActive = true },
+                new Project { Id = 2, Name = "EX Survey", Code = "EX_SURVEY", IsActive = true },
+                new Project { Id = 3, Name = "AURAS", Code = "AURAS", IsActive = true }
+            );
+
+            modelBuilder.Entity<ProjectRole>().HasData(
+                new ProjectRole { Id = 1, ProjectId = 1, RoleName = "Manager", IsPublicRegistrationAllowed = true },
+                new ProjectRole { Id = 2, ProjectId = 1, RoleName = "Surveyor", IsPublicRegistrationAllowed = true },
+                //new ProjectRole { Id = 3, ProjectId = 1, RoleName = "User", IsPublicRegistrationAllowed = true },
+                new ProjectRole { Id = 4, ProjectId = 1, RoleName = "Client", IsPublicRegistrationAllowed = false },
+
+                new ProjectRole { Id = 5, ProjectId = 2, RoleName = "Manager", IsPublicRegistrationAllowed = true },
+                new ProjectRole { Id = 6, ProjectId = 2, RoleName = "Surveyor", IsPublicRegistrationAllowed = true },
+                //new ProjectRole { Id = 7, ProjectId = 2, RoleName = "User", IsPublicRegistrationAllowed = true },
+                new ProjectRole { Id = 8, ProjectId = 2, RoleName = "Client", IsPublicRegistrationAllowed = false },
+
+                new ProjectRole { Id = 9, ProjectId = 3, RoleName = "Manager", IsPublicRegistrationAllowed = true },
+                new ProjectRole { Id = 10, ProjectId = 3, RoleName = "User", IsPublicRegistrationAllowed = true }
+                //new ProjectRole { Id = 11, ProjectId = 3, RoleName = "Client", IsPublicRegistrationAllowed = false },
+
+                //new ProjectRole { Id = 12, ProjectId = 3, RoleName = "Admin", IsPublicRegistrationAllowed = false }
+            );
 
             base.OnModelCreating(modelBuilder);
         }

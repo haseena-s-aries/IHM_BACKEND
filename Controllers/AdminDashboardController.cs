@@ -6,7 +6,10 @@ using Survey_Certification_App.Data;
 using Survey_Certification_App.DTOS;
 using Survey_Certification_App.Models;
 using Survey_Certification_App.Models.Survey;
+using Survey_Certification_App.Services;
 using System.Security.Claims;
+
+
 
 namespace Survey_Certification_App.Controllers
 {
@@ -17,18 +20,38 @@ namespace Survey_Certification_App.Controllers
     public class AdminDashboardController : Controller
     {
         private readonly ApplicationDbContext _db;
+        private readonly AccessScopeService _access;
 
-        public AdminDashboardController(ApplicationDbContext db)
+        public AdminDashboardController(ApplicationDbContext db, AccessScopeService access)
         {
             _db = db;
+            _access = access;
         }
 
-        
+        [HttpGet("projects/{projectId:int}/roles")]
+        public async Task<IActionResult> GetProjectRolesForUserManagement(int projectId)
+        {
+            if (!_access.IsAdmin && _access.ProjectId != projectId)
+                return Forbid();
+
+            var roles = await _db.ProjectRoles
+                .AsNoTracking()
+                .Where(x => x.ProjectId == projectId)
+                .OrderBy(x => x.RoleName)
+                .Select(x => new
+                {
+                    id = x.Id,
+                    roleName = x.RoleName
+                })
+                .ToListAsync();
+
+            return Ok(roles);
+        }
 
         [HttpGet("GetAll")]
         public async Task<IActionResult> GetAllUsers()
         {
-            var users = await _db.users.ToListAsync();
+            var users = await _access.FilterUsers(_db.users.AsNoTracking()).ToListAsync();
             return Ok(users);
         }
 
@@ -143,7 +166,9 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("GetById/{id}")]
         public async Task<IActionResult> GetUserById(int id)
         {
-            var user = await _db.users.FindAsync(id);
+            var user = await _access
+    .FilterUsers(_db.users.AsNoTracking())
+    .FirstOrDefaultAsync(x => x.Id == id);
             if (user == null) return NotFound("User not found");
             return Ok(user);
         }
@@ -175,12 +200,59 @@ namespace Survey_Certification_App.Controllers
 
             if (emailExists)
                 return BadRequest(new { message = "Email already exists" });
+            if (!_access.IsAdmin &&
+    string.Equals(userDto.Role, "Admin", StringComparison.OrdinalIgnoreCase))
+            {
+                return Forbid();
+            }
 
+            if (!_access.IsAdmin &&
+                user.ProjectId != _access.ProjectId)
+            {
+                return Forbid();
+            }
             user.FullName = userDto.FullName;
             user.Email = email;
             user.Role = userDto.Role;
+            user.RoleName = userDto.Role;
 
+            if (_access.IsAdmin)
+            {
+                var selectedRole = userDto.RoleName ?? userDto.Role;
 
+                if (string.Equals(selectedRole, "Admin", StringComparison.OrdinalIgnoreCase))
+                {
+                    user.ProjectId = null;
+                    user.ProjectName = "All Projects";
+                    user.Role = "Admin";
+                    user.RoleName = "Admin";
+                    user.RoleId = userDto.RoleId;
+                }
+                else
+                {
+                    if (!userDto.ProjectId.HasValue || userDto.ProjectId.Value <= 0)
+                        return BadRequest(new { message = "Invalid project selected." });
+
+                    var project = await _db.Projects
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(x => x.Id == userDto.ProjectId.Value && x.IsActive);
+
+                    if (project == null)
+                        return BadRequest(new { message = "Invalid project selected." });
+
+                    user.ProjectId = project.Id;
+                    user.ProjectName = project.Name;
+                    user.Role = userDto.Role;
+                    user.RoleName = selectedRole;
+                    user.RoleId = userDto.RoleId;
+                }
+            }
+            else
+            {
+                user.ProjectId = _access.ProjectId;
+                user.ProjectName = User.FindFirst("projectName")?.Value ?? user.ProjectName;
+                user.RoleName = userDto.RoleName ?? userDto.Role;
+            }
             await _db.SaveChangesAsync();
 
             return Ok(new { message = "User updated successfully" });
@@ -200,7 +272,62 @@ namespace Survey_Certification_App.Controllers
             var emailExists = await _db.users.AnyAsync(u => u.Email.ToLower() == email);
             if (emailExists)
                 return BadRequest(new { message = "Email already exists" });
+            if (!_access.IsAdmin &&
+    string.Equals(userDto.Role, "Admin", StringComparison.OrdinalIgnoreCase))
+            {
+                return Forbid();
+            }
+            var selectedRole = userDto.RoleName ?? userDto.Role;
 
+            if (string.Equals(selectedRole, "Admin", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!_access.IsAdmin)
+                    return Forbid();
+
+                userDto.ProjectId = null;
+                userDto.ProjectName = "All Projects";
+                userDto.Role = "Admin";
+                userDto.RoleName = "Admin";
+            }
+
+            var creator = _access.UserId.HasValue
+                ? await _db.users.AsNoTracking().FirstOrDefaultAsync(x => x.Id == _access.UserId.Value)
+                : null;
+
+            int? projectId;
+            string? projectName;
+
+            if (_access.IsAdmin && string.Equals(userDto.RoleName ?? userDto.Role, "Admin", StringComparison.OrdinalIgnoreCase))
+            {
+                projectId = null;
+                projectName = "All Projects";
+            }
+            else if (_access.IsAdmin)
+            {
+                if (!userDto.ProjectId.HasValue || userDto.ProjectId.Value <= 0)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                var project = await _db.Projects
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.Id == userDto.ProjectId.Value && x.IsActive);
+
+                if (project == null)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                projectId = project.Id;
+                projectName = project.Name;
+            }
+            else
+            {
+                projectId = creator?.ProjectId;
+                projectName = creator?.ProjectName;
+            }
+
+            if (!_access.IsAdmin && !projectId.HasValue)
+                return Forbid();
+
+            if (string.Equals(userDto.Role, "Admin", StringComparison.OrdinalIgnoreCase) && !_access.IsAdmin)
+                return Forbid();
             var user = new User
             {
                 FullName = userDto.FullName,
@@ -210,7 +337,12 @@ namespace Survey_Certification_App.Controllers
                 RequestedRole = null,
                 IsOtpVerified = true,
                 ApprovedAt = DateTime.UtcNow,
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(userDto.Password)
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(userDto.Password),
+                ProjectId = projectId,
+                ProjectName = projectName,
+                CreatedByUserId = _access.UserId,
+                RoleId = userDto.RoleId,
+                RoleName = userDto.RoleName ?? userDto.Role
             };
 
             _db.users.Add(user);
@@ -222,12 +354,18 @@ namespace Survey_Certification_App.Controllers
         [HttpDelete("Delete/{id}")]
         public async Task<IActionResult> Delete(int id)
         {
-            var user = await _db.users.FindAsync(id);
+            var user = await _access
+            .FilterUsers(_db.users)
+            .FirstOrDefaultAsync(x => x.Id == id);
             if (user == null)
             {
                 return NotFound("User not found.");
             }
-
+            if (!_access.IsAdmin &&
+    string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase))
+            {
+                return Forbid();
+            }
             _db.users.Remove(user);
             await _db.SaveChangesAsync();
             return Ok("User deleted successfully.");
@@ -238,9 +376,17 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("certificate-report")]
         public async Task<IActionResult> GetCertificateReport()
         {
-            int towageCount = await _db.certificates.CountAsync();
-            int seaFasteningCount = await _db.SeaFastenings.CountAsync();
-            int loadoutCount = await _db.loadoutCertificates.CountAsync();
+            int towageCount = _access.IsAdmin || _access.ProjectId == 3
+    ? await _db.certificates.CountAsync()
+    : 0;
+
+            int seaFasteningCount = _access.IsAdmin || _access.ProjectId == 3
+                ? await _db.SeaFastenings.CountAsync()
+                : 0;
+
+            int loadoutCount = _access.IsAdmin || _access.ProjectId == 3
+                ? await _db.loadoutCertificates.CountAsync()
+                : 0;
 
             var dto = new TotalCertificateCountDto
             {
@@ -282,7 +428,7 @@ namespace Survey_Certification_App.Controllers
             var userIdText = currentUserId?.ToString();
 
             var towageQuery = _db.certificates.AsNoTracking();
-            if (!isAdmin)
+            if (!isAdmin && _access.ProjectId != 3)
             {
                 // Towage certificates do not currently persist creator ownership.
                 // Do not expose unowned reports to managers.
@@ -303,7 +449,7 @@ namespace Survey_Certification_App.Controllers
             }).ToListAsync();
 
             var seaFasteningQuery = _db.SeaFastenings.AsNoTracking();
-            if (!isAdmin)
+            if (!isAdmin && _access.ProjectId != 3)
             {
                 seaFasteningQuery = seaFasteningQuery.Where(x => userIdText != null && x.UserId == userIdText);
             }
@@ -322,7 +468,7 @@ namespace Survey_Certification_App.Controllers
             }).ToListAsync();
 
             var loadoutQuery = _db.loadoutCertificates.AsNoTracking();
-            if (!isAdmin)
+            if (!isAdmin && _access.ProjectId != 3)
             {
                 // Loadout certificates do not currently persist creator ownership.
                 // Do not expose unowned reports to managers.
@@ -342,24 +488,11 @@ namespace Survey_Certification_App.Controllers
                 PdfFilePath = x.PdfFilePath
             }).ToListAsync();
 
-            var ihmJobsQuery = _db.SurveyJobs
-                .AsNoTracking()
-                .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey);
+            var ihmJobsQuery = _access
+    .FilterJobs(_db.SurveyJobs.AsNoTracking())
+    .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey);
 
-            if (!isAdmin && currentUserId.HasValue)
-            {
-                ihmJobsQuery = ihmJobsQuery.Where(x =>
-                    x.CreatedByUserId == currentUserId.Value ||
-                    x.AssignedManagerId == currentUserId.Value ||
-                    x.AssignedUserId == currentUserId.Value ||
-                    x.Assignments.Any(a =>
-                        a.SurveyorUserId == currentUserId.Value &&
-                        a.Status != SurveyAssignmentStatus.Returned));
-            }
-            else if (!isAdmin)
-            {
-                ihmJobsQuery = ihmJobsQuery.Where(x => false);
-            }
+            
 
             var ihmJobs = await ihmJobsQuery
                 .Select(x => new { x.Id, x.VesselName, x.ProjectName, x.JobNumber, x.Status, x.CreatedByUserId, x.CreatedAt })
@@ -420,6 +553,8 @@ namespace Survey_Certification_App.Controllers
             public string? Status { get; set; }
             public string? CreatedBy { get; set; }
             public int? CreatedByUserId { get; set; }
+            public int? ProjectId { get; set; }
+            public string? ProjectName { get; set; }
             public DateOnly? SavedDate { get; set; }
             public DateTime? SavedAt { get; set; }
             [System.Text.Json.Serialization.JsonIgnore]

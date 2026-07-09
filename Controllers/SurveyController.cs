@@ -6,6 +6,7 @@ using Survey_Certification_App.Models;
 using Survey_Certification_App.Models.Survey;
 using System.Net;
 using System.Security.Claims;
+using Survey_Certification_App.Services;
 
 namespace Survey_Certification_App.Controllers
 {
@@ -16,15 +17,17 @@ namespace Survey_Certification_App.Controllers
         private readonly ApplicationDbContext _db;
         private readonly IEmailService _emailService;
         private readonly ILogger<SurveyController> _logger;
-
+        private readonly AccessScopeService _access;
         public SurveyController(
             ApplicationDbContext db,
             IEmailService emailService,
-            ILogger<SurveyController> logger)
+            ILogger<SurveyController> logger,
+            AccessScopeService access)
         {
             _db = db;
             _emailService = emailService;
             _logger = logger;
+            _access = access;
         }
 
         //   [HttpGet("jobs")]
@@ -127,7 +130,7 @@ namespace Survey_Certification_App.Controllers
             var currentUserId = GetCurrentUserId();
             if (!currentUserId.HasValue)
                 return Unauthorized("Login is required to create a survey job.");
-
+           
             var createdBy = request.CreatedByUserId ?? currentUserId.Value;
             if (!IsCurrentUserAdmin() && createdBy != currentUserId.Value)
                 return Forbid();
@@ -151,13 +154,40 @@ namespace Survey_Certification_App.Controllers
                 if (vessel == null)
                     return BadRequest("Selected vessel not found.");
             }
+            int? projectId;
+            string? projectName;
 
+            if (_access.IsAdmin)
+            {
+                if (!request.ProjectId.HasValue || request.ProjectId.Value <= 0)
+                    return BadRequest(new { message = "Project is required when Admin creates a job." });
+
+                var project = await _db.Projects
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.Id == request.ProjectId.Value);
+
+                if (project == null)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                projectId = project.Id;
+                projectName = project.Name;
+            }
+            else
+            {
+                if (!_access.ProjectId.HasValue)
+                    return Forbid();
+
+                projectId = _access.ProjectId.Value;
+                projectName = User.FindFirst("projectName")?.Value;
+            }
             var job = new SurveyJob
             {
                 ModuleType = request.ModuleType,
+                ProjectId = projectId,
+                ProjectName = projectName,
                 JobNumber = request.JobNumber.Trim(),
                 ClientName = vessel?.ClientName ?? request.ClientName,
-                ProjectName = request.ProjectName,
+                
                 AuditPort = request.AuditPort,
                 AuditAddress = request.AuditAddress,
 
@@ -855,30 +885,7 @@ namespace Survey_Certification_App.Controllers
 
         private IQueryable<SurveyJob> ApplyJobAccessFilter(IQueryable<SurveyJob> query)
         {
-            if (IsCurrentUserAdmin())
-                return query;
-
-            var currentUserId = GetCurrentUserId();
-            if (!currentUserId.HasValue || currentUserId.Value <= 0)
-                return query.Where(x => false);
-
-            var role = GetCurrentUserRole();
-            if (string.Equals(role, "Manager", StringComparison.OrdinalIgnoreCase))
-            {
-                return query.Where(x =>
-                    x.CreatedByUserId == currentUserId.Value ||
-                    x.AssignedManagerId == currentUserId.Value ||
-                    x.AssignedUserId == currentUserId.Value ||
-                    x.Assignments.Any(a =>
-                        a.SurveyorUserId == currentUserId.Value &&
-                        a.Status != SurveyAssignmentStatus.Returned));
-            }
-
-            return query.Where(x =>
-                x.AssignedUserId == currentUserId.Value ||
-                x.Assignments.Any(a =>
-                    a.SurveyorUserId == currentUserId.Value &&
-                    a.Status != SurveyAssignmentStatus.Returned));
+            return _access.FilterJobs(query);
         }
 
         private async Task<bool> CanAccessJobAsync(int jobId)
@@ -1038,6 +1045,7 @@ namespace Survey_Certification_App.Controllers
                 ModuleType = job.ModuleType.ToString(),
                 JobNumber = job.JobNumber,
                 ClientName = job.ClientName,
+                ProjectId = job.ProjectId,
                 ProjectName = job.ProjectName,
                 VesselId = job.VesselId,
                 VesselSnapshotJson = job.VesselSnapshotJson,
@@ -1077,11 +1085,11 @@ namespace Survey_Certification_App.Controllers
         public class CreateSurveyJobRequest
         {
             public SurveyModuleType ModuleType { get; set; }
-
+            public int? ProjectId { get; set; }
             public string JobNumber { get; set; } = string.Empty;
             public int? VesselId { get; set; }
             public string? ClientName { get; set; }
-
+   
             public string? ProjectName { get; set; }
 
             public string? VesselName { get; set; }
@@ -1153,7 +1161,7 @@ namespace Survey_Certification_App.Controllers
 
             public string? AuditPort { get; set; }
             public string? AuditAddress { get; set; }
-
+            public int? ProjectId { get; set; }
 
             public string? ProjectName { get; set; }
             public int? VesselId { get; set; }

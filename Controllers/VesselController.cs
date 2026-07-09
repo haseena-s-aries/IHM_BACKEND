@@ -2,6 +2,7 @@
 using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.Models;
+using Survey_Certification_App.Services;
 
 namespace Survey_Certification_App.Controllers
 {
@@ -10,16 +11,39 @@ namespace Survey_Certification_App.Controllers
     public class VesselController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
+        private readonly AccessScopeService _access;
 
-        public VesselController(ApplicationDbContext db)
+        public VesselController(ApplicationDbContext db, AccessScopeService access)
         {
             _db = db;
+            _access = access;
         }
+        private IQueryable<Vessel> ApplyVesselAccessFilter(IQueryable<Vessel> query)
+        {
+            if (_access.IsAdmin)
+                return query;
 
+            if (_access.IsClient && _access.UserId.HasValue)
+            {
+                return query.Where(v =>
+                    _db.ClientVesselMappings.Any(m =>
+                        m.UserId == _access.UserId.Value &&
+                        m.VesselId == v.Id));
+            }
+
+            if (_access.UserId.HasValue && _access.ProjectId.HasValue)
+            {
+                return query.Where(v =>
+                    v.ProjectId == _access.ProjectId.Value &&
+                    v.CreatedByUserId == _access.UserId.Value);
+            }
+
+            return query.Where(v => false);
+        }
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            var vessels = await _db.Vessels
+            var vessels = await ApplyVesselAccessFilter(_db.Vessels)
                 .Where(x => x.Status == VesselStatus.Active)
                 .OrderBy(x => x.VesselName)
                 .Select(x => ToDto(x))
@@ -31,7 +55,8 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("{id:int}")]
         public async Task<IActionResult> GetById(int id)
         {
-            var vessel = await _db.Vessels.FindAsync(id);
+            var vessel = await ApplyVesselAccessFilter(_db.Vessels)
+     .FirstOrDefaultAsync(x => x.Id == id);
 
             if (vessel == null)
                 return NotFound("Vessel not found.");
@@ -42,6 +67,8 @@ namespace Survey_Certification_App.Controllers
         [HttpPost]
         public async Task<IActionResult> Create([FromBody] SaveVesselRequest request)
         {
+            if (_access.IsClient)
+                return Forbid();
             if (string.IsNullOrWhiteSpace(request.VesselName))
                 return BadRequest("Vessel name is required.");
 
@@ -72,6 +99,35 @@ namespace Survey_Certification_App.Controllers
                 LengthBetweenPerpendiculars = request.LengthBetweenPerpendiculars,
                 DraughtMoulded = request.DraughtMoulded,
             };
+            if (!_access.IsAdmin)
+            {
+                if (!_access.ProjectId.HasValue || !_access.UserId.HasValue)
+                    return Forbid();
+
+                vessel.ProjectId = _access.ProjectId.Value;
+                vessel.ProjectName = User.FindFirst("projectName")?.Value;
+                vessel.CreatedByUserId = _access.UserId.Value;
+            }
+            else
+            {
+                vessel.ProjectId = request.ProjectId;
+
+                if (request.ProjectId.HasValue && request.ProjectId.Value > 0)
+                {
+                    var project = await _db.Projects
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(x => x.Id == request.ProjectId.Value);
+
+                    vessel.ProjectName = project?.Name;
+                }
+                else
+                {
+                    vessel.ProjectId = null;
+                    vessel.ProjectName = null;
+                }
+
+                vessel.CreatedByUserId = _access.UserId;
+            }
 
             _db.Vessels.Add(vessel);
             await _db.SaveChangesAsync();
@@ -82,7 +138,10 @@ namespace Survey_Certification_App.Controllers
         [HttpPut("{id:int}")]
         public async Task<IActionResult> Update(int id, [FromBody] SaveVesselRequest request)
         {
-            var vessel = await _db.Vessels.FindAsync(id);
+            if (_access.IsClient)
+                return Forbid();
+            var vessel = await ApplyVesselAccessFilter(_db.Vessels)
+    .FirstOrDefaultAsync(x => x.Id == id);
 
             if (vessel == null)
                 return NotFound("Vessel not found.");
@@ -119,7 +178,10 @@ namespace Survey_Certification_App.Controllers
         [HttpPost("{id:int}/deactivate")]
         public async Task<IActionResult> Deactivate(int id)
         {
-            var vessel = await _db.Vessels.FindAsync(id);
+            if (_access.IsClient)
+                return Forbid();
+            var vessel = await ApplyVesselAccessFilter(_db.Vessels)
+    .FirstOrDefaultAsync(x => x.Id == id);
 
             if (vessel == null)
                 return NotFound("Vessel not found.");
@@ -135,6 +197,7 @@ namespace Survey_Certification_App.Controllers
         [HttpDelete("{id:int}")]
         public Task<IActionResult> Delete(int id)
         {
+
             return Deactivate(id);
         }
 
@@ -165,13 +228,17 @@ namespace Survey_Certification_App.Controllers
                 DateOfBuild = vessel.DateOfBuild,
                 LengthBetweenPerpendiculars = vessel.LengthBetweenPerpendiculars,
                 DraughtMoulded = vessel.DraughtMoulded,
+                ProjectId = vessel.ProjectId,
+                ProjectName = vessel.ProjectName,
                 Status = vessel.Status.ToString()
             };
         }
     }
-
+    
     public class SaveVesselRequest
     {
+        public int? ProjectId { get; set; }
+        public string? ProjectName { get; set; }
         public string VesselName { get; set; } = string.Empty;
         public string? ImoNumber { get; set; }
         public string? OfficialNumber { get; set; }

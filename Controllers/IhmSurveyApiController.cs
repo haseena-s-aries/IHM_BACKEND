@@ -15,6 +15,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
+using Survey_Certification_App.Services;
 
 namespace Survey_Certification_App.Controllers
 {
@@ -33,10 +34,11 @@ namespace Survey_Certification_App.Controllers
             public string? FilePath { get; set; }
         }
         private readonly ApplicationDbContext _db;
-
-        public IhmSurveyApiController(ApplicationDbContext db)
+        private readonly AccessScopeService _access;
+        public IhmSurveyApiController(ApplicationDbContext db, AccessScopeService access)
         {
             _db = db;
+            _access = access;
         }
 
         [HttpGet("jobs/{jobId:int}/areas")]
@@ -56,7 +58,7 @@ namespace Survey_Certification_App.Controllers
             int jobId,
             [FromBody] CreateIhmAreaRequest request)
         {
-            var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
+            var jobExists = await CanAccessIhmJobAsync(jobId);
 
             if (!jobExists)
                 return NotFound("Survey job not found.");
@@ -596,7 +598,7 @@ namespace Survey_Certification_App.Controllers
         {
             try
             {
-                var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
+                var jobExists = await CanAccessIhmJobAsync(jobId);
 
                 if (!jobExists)
                     return NotFound("Survey job not found.");
@@ -1349,7 +1351,7 @@ namespace Survey_Certification_App.Controllers
             IFormFile file,
             [FromForm] int? uploadedByUserId)
         {
-            var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
+            var jobExists = await CanAccessIhmJobAsync(jobId);
 
             if (!jobExists)
                 return NotFound("Survey job not found.");
@@ -2350,17 +2352,7 @@ namespace Survey_Certification_App.Controllers
                 User.FindFirstValue("role");
             var isAdmin = string.Equals(role, "Admin", StringComparison.OrdinalIgnoreCase);
 
-            var canAccess = isAdmin || (currentUserId.HasValue && await _db.SurveyJobs
-                .AsNoTracking()
-                .AnyAsync(x =>
-                    x.Id == jobId &&
-                    x.ModuleType == SurveyModuleType.IhmSurvey &&
-                    (x.CreatedByUserId == currentUserId.Value ||
-                     x.AssignedManagerId == currentUserId.Value ||
-                     x.AssignedUserId == currentUserId.Value ||
-                     x.Assignments.Any(a =>
-                         a.SurveyorUserId == currentUserId.Value &&
-                         a.Status != SurveyAssignmentStatus.Returned))));
+            var canAccess = await CanAccessIhmJobAsync(jobId);
 
             if (!canAccess)
                 return Forbid();
@@ -2567,7 +2559,12 @@ namespace Survey_Certification_App.Controllers
             checkpoint.UpdatedAt = DateTime.UtcNow;
         }
 
-
+        private async Task<bool> CanAccessIhmJobAsync(int jobId)
+        {
+            return await _access
+                .FilterJobs(_db.SurveyJobs.AsQueryable())
+                .AnyAsync(x => x.Id == jobId && x.ModuleType == SurveyModuleType.IhmSurvey);
+        }
         private int? GetCurrentUserId()
         {
             var claimValue =

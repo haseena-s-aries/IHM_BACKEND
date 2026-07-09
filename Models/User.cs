@@ -34,6 +34,18 @@ namespace Survey_Certification_App.Models
 
         public string? RequestedRole { get; set; }    // "User", "Manager", "Admin"
 
+        public int? ProjectId { get; set; }
+
+        [MaxLength(50)]
+        public string? ProjectName { get; set; }
+
+        public int? RoleId { get; set; }
+
+        [MaxLength(50)]
+        public string? RoleName { get; set; }
+
+        public int? CreatedByUserId { get; set; }
+
         public bool IsApproved { get; set; } = false; // default false (must be approved)
         public bool IsRejected { get; set; } = false;
 
