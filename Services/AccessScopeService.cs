@@ -32,7 +32,7 @@ namespace Survey_Certification_App.Services
         public bool IsAdmin => string.Equals(Role, "Admin", StringComparison.OrdinalIgnoreCase);
         public bool IsManager => string.Equals(Role, "Manager", StringComparison.OrdinalIgnoreCase);
         public bool IsClient => string.Equals(Role, "Client", StringComparison.OrdinalIgnoreCase);
-
+        public bool IsSurveyor => string.Equals(Role, "Surveyor", StringComparison.OrdinalIgnoreCase);
         public IQueryable<SurveyJob> FilterJobs(IQueryable<SurveyJob> query)
         {
             if (IsAdmin)
@@ -45,6 +45,32 @@ namespace Survey_Certification_App.Services
                     _db.ClientVesselMappings.Any(map =>
                         map.UserId == UserId.Value &&
                         map.VesselId == job.VesselId.Value));
+            }
+
+            if (IsSurveyor && ProjectId.HasValue && UserId.HasValue)
+            {
+                return query.Where(job =>
+                    job.ProjectId == ProjectId.Value &&
+                    (
+                        job.CreatedByUserId == UserId.Value ||
+                        job.AssignedUserId == UserId.Value ||
+                        job.Assignments.Any(a =>
+                            a.SurveyorUserId == UserId.Value &&
+                            a.Status != SurveyAssignmentStatus.Returned)
+                    ));
+            }
+
+            if (IsSurveyor && ProjectId.HasValue && UserId.HasValue)
+            {
+                return query.Where(job =>
+                    job.ProjectId == ProjectId.Value &&
+                    (
+                        job.CreatedByUserId == UserId.Value ||
+                        job.AssignedUserId == UserId.Value ||
+                        job.Assignments.Any(a =>
+                            a.SurveyorUserId == UserId.Value &&
+                            a.Status != SurveyAssignmentStatus.Returned)
+                    ));
             }
 
             if (ProjectId.HasValue && UserId.HasValue)

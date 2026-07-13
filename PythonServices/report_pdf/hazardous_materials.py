@@ -221,35 +221,11 @@ def _write_cache_manifest(cache_dir, cache_key, payload):
 
 def make_hazard_pdf_ready_image(image_path, target_width_pt, target_height_pt, label):
     image_path = Path(image_path)
-    stat = image_path.stat()
-
-    cache_dir = image_path.parent / "pdf-ready-images"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    payload = {
-        "path": str(image_path.resolve()),
-        "mtimeNs": stat.st_mtime_ns,
-        "size": stat.st_size,
-        "targetWidthPt": round(float(target_width_pt), 2),
-        "targetHeightPt": round(float(target_height_pt), 2),
-        "dpi": 150,
-        "label": label,
-    }
-
-    cache_key = hashlib.sha256(
-        json.dumps(payload, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-
-    ready_path = cache_dir / f"{cache_key}.jpg"
-
-    if ready_path.exists():
-        print(f"CACHE HIT hazard pdf-ready image {ready_path}", file=sys.stderr)
-        return ready_path
-
-    print(f"CACHE MISS hazard pdf-ready image {image_path}", file=sys.stderr)
 
     target_w_px = max(1, int(float(target_width_pt) / 72 * 150))
     target_h_px = max(1, int(float(target_height_pt) / 72 * 150))
+
+    ready_path = image_path.parent / f"{image_path.stem}-pdf-ready.tmp.jpg"
 
     with Image.open(image_path) as img:
         img = ImageOps.exif_transpose(img).convert("RGB")
@@ -257,6 +233,7 @@ def make_hazard_pdf_ready_image(image_path, target_width_pt, target_height_pt, l
         img.save(ready_path, "JPEG", quality=92, optimize=True)
 
     return ready_path
+
 def detect_existing_sample_text_markings(image_path, expected_labels=None):
     expected = {
         normalize_sample_label(label)
@@ -973,13 +950,24 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
             text_y += 18
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas_img.save(output_path)
+    canvas_img.save(output_path, format="PNG")
     return output_path
 
+def build_i2_hazard_layout_images(data, output_dir=None):
+    use_fixed_output_dir = output_dir is not None
+    equipment_rows = get_rows(
+        data,
+        "equipmentAndMachinery",
+        "EquipmentAndMachinery",
+        "equipment",
+        "Equipment"
+    )
 
-def build_i2_hazard_layout_images(data):
-    equipment_rows = get_rows(data, "equipmentAndMachinery", "equipment")
-    markers = dedupe_latest_markers(data.get("markers") or [])
+    markers = dedupe_latest_markers(
+        data.get("markers")
+        or data.get("Markers")
+        or []
+    )
     markers_by_label = {}
 
     for marker in markers:
@@ -1045,82 +1033,22 @@ def build_i2_hazard_layout_images(data):
         print("Hazard OCR skipped: all I-2 samples have marker positions.", file=sys.stderr)
 
     if missing_sample_nos:
-        found_existing_sample_nos = set()
-
-        for layout_source in layout_sources_for_ocr:
-            layout_path = resolve_report_image_path(layout_source)
-            if not layout_path or not layout_path.exists():
-                continue
-
-            normalized_layout_source = normalize_web_path(layout_source)
-            ocr_markings = detect_all_existing_sample_markings(
-                layout_path,
-                expected_labels=missing_sample_nos
-            )
-            print(
-                f"Hazard OCR source: {layout_path} detected: "
-                + ", ".join(sorted(normalize_sample_label(x.get("label")) for x in ocr_markings)),
-                file=sys.stderr
-            )
-            ocr_by_label = {
-                normalize_sample_label(item["label"]): item
-                for item in ocr_markings
-            }
-
-            for sample_no in missing_sample_nos:
-                if sample_no in found_existing_sample_nos:
-                    continue
-
-                ocr_item = ocr_by_label.get(sample_no)
-                if not ocr_item:
-                    continue
-
-                row = i2_rows_by_sample_no[sample_no]
-                label = hazard_marker_label(row)
-
-                grouped_by_image.setdefault(normalized_layout_source, {
-                    "source": layout_source,
-                    "items": []
-                })
-
-                grouped_by_image[normalized_layout_source]["items"].append({
-                    "marker": {
-                        "markerLabel": sample_no,
-                        "imagePath": layout_source,
-                        "xPercent": ocr_item["xPercent"],
-                        "yPercent": ocr_item["yPercent"],
-                        "widthPercent": ocr_item.get("widthPercent"),
-                        "heightPercent": ocr_item.get("heightPercent"),
-                        "source": "existing-image",
-                        "notes": "ocr-existing-label",
-                    },
-                    "label": label,
-                })
-
-                found_existing_sample_nos.add(sample_no)
-
-        skipped = [
-            sample_no
-            for sample_no in missing_sample_nos
-            if sample_no not in found_existing_sample_nos
-        ]
-
-        if skipped:
-            message = (
-                "I-2 hazard layout skipped samples without marker position: "
-                + ", ".join(skipped)
-            )
-
-            print(message, file=sys.stderr)
-
-            log_path = Path.cwd() / "wwwroot" / "reports" / "ihm" / "hazard-ocr-log.txt"
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            old_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
-            log_path.write_text(old_log + "\n" + message, encoding="utf-8")
+        print(
+            "Hazard OCR skipped during generated image creation. "
+            "Use Auto Map to create marker positions before generating PDF. "
+            "Missing I-2 marker positions: " + ", ".join(missing_sample_nos),
+            file=sys.stderr
+        )
 
     generated = []
     print(f"I-2 hazard layout image groups: {len(grouped_by_image)}", file=sys.stderr)
-    output_dir = Path.cwd() / "wwwroot" / "reports" / "ihm" / str((data.get("job") or {}).get("id") or "0") / "i2-hazard-layouts"
+    if output_dir is None:
+        job = data.get("job") or data.get("Job") or {}
+        job_id = job.get("id") or job.get("Id") or "0"
+        output_dir = Path.cwd() / "wwwroot" / "reports" / "ihm" / str(job_id) / "i2-hazard-layouts"
+    else:
+        output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     for index, group in enumerate(grouped_by_image.values(), start=1):
         source_path = resolve_report_image_path(group["source"])
@@ -1143,43 +1071,70 @@ def build_i2_hazard_layout_images(data):
 
         bottom_dot_offset = 0
 
-        output_path = output_dir / f"i2-hazard-layout-{index}.png"
+        output_path = output_dir / f"hazardous-i2-layout-{index}.tmp"
+        final_output_path = output_dir / f"hazardous-i2-layout-{index}.png"
 
-        cache_dir = _layout_cache_dir(data)
         cache_payload = {
             "source": _file_fingerprint(source_path),
             "items": group["items"],
             "bottomDotOffset": bottom_dot_offset,
         }
-        cache_key = _cache_key(source_path, group["items"], {"bottomDotOffset": bottom_dot_offset})
-        cached_image = _try_cached_layout(cache_dir, cache_key)
 
-        if cached_image is None:
-            cache_image = _cache_image_path(cache_dir, cache_key)
+        if use_fixed_output_dir:
             started = time.perf_counter()
             generated_image = draw_hazard_marked_layout_image(
                 source_path,
                 group["items"],
-                cache_image,
+                output_path,
                 bottom_dot_offset=bottom_dot_offset
             )
-            _write_cache_manifest(cache_dir, cache_key, cache_payload)
+            if not output_path.exists() or output_path.stat().st_size <= 0:
+                raise RuntimeError(f"Hazardous image output is empty: {output_path}")
+
+            if final_output_path.exists():
+                final_output_path.unlink()
+
+            output_path.replace(final_output_path)
+            generated_image = final_output_path
             print(
-                f"Image processing generated={generated_image} elapsed_ms={int((time.perf_counter() - started) * 1000)}",
+                f"Pre-generated hazardous marked image={generated_image} elapsed_ms={int((time.perf_counter() - started) * 1000)}",
                 file=sys.stderr
             )
             generated.append(generated_image)
         else:
-            generated.append(cached_image)
+            cache_dir = _layout_cache_dir(data)
+            cache_key = _cache_key(source_path, group["items"], {"bottomDotOffset": bottom_dot_offset})
+            cached_image = _try_cached_layout(cache_dir, cache_key)
+
+            if cached_image is None:
+                cache_image = _cache_image_path(cache_dir, cache_key)
+                started = time.perf_counter()
+                generated_image = draw_hazard_marked_layout_image(
+                    source_path,
+                    group["items"],
+                    cache_image,
+                    bottom_dot_offset=bottom_dot_offset
+                )
+                _write_cache_manifest(cache_dir, cache_key, cache_payload)
+                print(
+                    f"Image processing generated={generated_image} elapsed_ms={int((time.perf_counter() - started) * 1000)}",
+                    file=sys.stderr
+                )
+                generated.append(generated_image)
+            else:
+                generated.append(cached_image)
 
     return generated
-
-
-def make_i2_hazard_layout_pages(data, vessel_name, company_name):
-    images = build_i2_hazard_layout_images(data)
+def make_hazard_layout_pages_from_images(images, vessel_name, company_name):
     pages = []
 
     for image_index, image_path in enumerate(images):
+        print("HAZARD IMAGE PDF INSERT START", file=sys.stderr)
+        image_path = Path(image_path)
+
+        if not image_path.exists() or image_path.stat().st_size <= 0:
+            print(f"HAZARD IMAGE PDF INSERT FAILED missing_or_empty={image_path}", file=sys.stderr)
+            raise FileNotFoundError(f"Hazardous I-2 image missing or empty: {image_path}")
         packet = BytesIO()
         c = canvas.Canvas(
             packet,
@@ -1192,6 +1147,7 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
             company_name=company_name,
             page_no_text="Page | "
         )
+
         if image_index == 0:
             title = "LOCATION DIAGRAM OF HAZARDOUS MATERIALS"
             title_font = TABLE_FONT_BOLD
@@ -1208,6 +1164,7 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
                 (HAZARD_LAYOUT_PAGE_WIDTH + title_w) / 2,
                 title_y - 2
             )
+
         usable_x = 45
         usable_y = 75
         usable_w = HAZARD_LAYOUT_PAGE_WIDTH - 90
@@ -1235,12 +1192,41 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
             preserveAspectRatio=True,
             mask="auto"
         )
-
+        print("HAZARD IMAGE PDF INSERT SUCCESS", file=sys.stderr)
         c.save()
         packet.seek(0)
         pages.extend(list(PdfReader(packet).pages))
 
     return pages
+
+def make_i2_hazard_layout_pages(data, vessel_name, company_name):
+    pre_generated_images = (
+        data.get("preGeneratedMarkedImages")
+        or data.get("PreGeneratedMarkedImages")
+        or {}
+    )
+
+    pre_generated = (
+        pre_generated_images.get("hazardous")
+        or pre_generated_images.get("Hazardous")
+    )
+    print(f"Appendix4 preGeneratedMarkedImages value={pre_generated}", file=sys.stderr)
+
+    if pre_generated:
+        manifest_path = resolve_report_image_path(pre_generated)
+        if manifest_path and manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                images = [Path(x) for x in manifest.get("images", []) if Path(x).exists()]
+                if images:
+                    print(f"Using pre-generated marked image. section=Hazardous count={len(images)}", file=sys.stderr)
+                    return make_hazard_layout_pages_from_images(images, vessel_name, company_name)
+            except Exception as exc:
+                print(f"Marked image missing, using fallback. section=Hazardous error={exc}", file=sys.stderr)
+        else:
+            print("Marked image missing, using fallback. section=Hazardous", file=sys.stderr)
+
+    raise FileNotFoundError("Pre-generated hazardous I-2 marked image manifest is missing or empty.")
 
 def get_rows(data, *keys):
     for key in keys:

@@ -192,7 +192,56 @@ namespace Survey_Certification_App.Models.Survey
 
         public IhmCheckpoint? IhmCheckpoint { get; set; }
     }
+    public enum IhmMarkedImageSectionType
+    {
+        Hazardous = 1,
+        Appendix4 = 2
+    }
 
+    public enum IhmMarkedImageStatus
+    {
+        Pending = 1,
+        Processing = 2,
+        Completed = 3,
+        Failed = 4
+    }
+
+    public class IhmMarkedImageMetadata
+    {
+        public int Id { get; set; }
+
+        public int SurveyJobId { get; set; }
+
+        public IhmMarkedImageSectionType SectionType { get; set; }
+
+        [MaxLength(500)]
+        public string SourceImagePath { get; set; } = string.Empty;
+
+        [MaxLength(500)]
+        public string? GeneratedImagePath { get; set; }
+
+        public DateTime? SourceImageLastModifiedUtc { get; set; }
+
+        [MaxLength(128)]
+        public string MarkerDataHash { get; set; } = string.Empty;
+
+        public IhmMarkedImageStatus Status { get; set; } = IhmMarkedImageStatus.Pending;
+
+        public int RetryCount { get; set; }
+
+        public DateTime? GeneratedAtUtc { get; set; }
+
+        public DateTime? LastQueuedAtUtc { get; set; }
+
+        [MaxLength(2000)]
+        public string? ErrorMessage { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+
+        public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
+
+        public SurveyJob? SurveyJob { get; set; }
+    }
     public class IhmAreaLayoutPlacement
     {
         public int Id { get; set; }

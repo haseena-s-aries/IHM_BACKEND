@@ -15,6 +15,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
+using Survey_Certification_App.Models;
 using Survey_Certification_App.Services;
 
 namespace Survey_Certification_App.Controllers
@@ -35,10 +37,21 @@ namespace Survey_Certification_App.Controllers
         }
         private readonly ApplicationDbContext _db;
         private readonly AccessScopeService _access;
-        public IhmSurveyApiController(ApplicationDbContext db, AccessScopeService access)
+        private readonly IIhmMarkedImageQueue _markedImageQueue;
+        public IhmSurveyApiController(
+    ApplicationDbContext db,
+    AccessScopeService access,
+    IIhmMarkedImageQueue markedImageQueue)
         {
             _db = db;
             _access = access;
+            _markedImageQueue = markedImageQueue;
+        }
+
+        private void QueueMarkedImages(int jobId, bool force = false)
+        {
+            _markedImageQueue.Queue(jobId, IhmMarkedImageSectionType.Appendix4, force);
+            _markedImageQueue.Queue(jobId, IhmMarkedImageSectionType.Hazardous, force);
         }
 
         [HttpGet("jobs/{jobId:int}/areas")]
@@ -233,7 +246,7 @@ namespace Survey_Certification_App.Controllers
                     await _db.SaveChangesAsync();
                 }
             }
-
+            QueueMarkedImages(request.SurveyJobId);
             return Ok(ToMarkerDto(marker));
         }
         [HttpPost("jobs/{jobId:int}/layouts/auto-map-markers")]
@@ -323,9 +336,11 @@ namespace Survey_Certification_App.Controllers
                 var checkpoint = expectedByCode[matched.Code];
                 var region = matched.Region;
 
+                var targetAreaId = checkpoint.IhmAreaId;
+
                 var marker = await _db.IhmImageMarkers.FirstOrDefaultAsync(x =>
                     x.SurveyJobId == jobId &&
-                    x.IhmAreaId == request.AreaId &&
+                    x.IhmAreaId == targetAreaId &&
                     x.IhmCheckpointId == checkpoint.Id);
 
                 if (marker == null)
@@ -333,7 +348,7 @@ namespace Survey_Certification_App.Controllers
                     marker = new IhmImageMarker
                     {
                         SurveyJobId = jobId,
-                        IhmAreaId = request.AreaId,
+                        IhmAreaId = targetAreaId,
                         IhmCheckpointId = checkpoint.Id,
                         CreatedByUserId = request.UserId ?? GetCurrentUserId() ?? 0,
                         CreatedAt = DateTime.UtcNow
@@ -356,11 +371,11 @@ namespace Survey_Certification_App.Controllers
             }
 
             await _db.SaveChangesAsync();
+            QueueMarkedImages(jobId);
 
             var savedMarkers = await _db.IhmImageMarkers
                 .Where(x =>
                     x.SurveyJobId == jobId &&
-                    x.IhmAreaId == request.AreaId &&
                     x.ImagePath == normalizedImagePath)
                 .Select(x => ToMarkerDto(x))
                 .ToListAsync();
@@ -677,97 +692,158 @@ namespace Survey_Certification_App.Controllers
                 if (parsed.Areas == null || parsed.Areas.Count == 0 || parsed.Areas.Sum(x => x.Checkpoints.Count) == 0)
                     return BadRequest("Invalid Excel format. Please upload the VSCP Checklist Template file.");
 
+                static string NormalizeExcelKey(string? value) =>
+                    (value ?? string.Empty).Trim().ToUpperInvariant();
+
+                static void AssignIfProvided(string? value, Action<string?> assign)
+                {
+                    if (!string.IsNullOrWhiteSpace(value))
+                        assign(value);
+                }
+
                 await using var transaction = await _db.Database.BeginTransactionAsync();
 
-                var oldMarkers = await _db.IhmImageMarkers
-                    .Where(x => x.SurveyJobId == jobId)
-                    .ToListAsync();
-
-                var oldCheckpoints = await _db.IhmCheckpoints
-                    .Where(x => x.SurveyJobId == jobId)
-                    .ToListAsync();
-
-                var oldAreas = await _db.IhmAreas
-                    .Where(x => x.SurveyJobId == jobId)
-                    .ToListAsync();
-
                 var oldEquipmentRows = await _db.IhmEquipmentMachineryReportRows
-                    .Where(x => x.SurveyJobId == jobId && x.IhmCheckpointId.HasValue)
+                    .Where(x => x.SurveyJobId == jobId)
                     .ToListAsync();
 
-                foreach (var row in oldEquipmentRows)
-                {
-                    row.IhmCheckpointId = null;
-                }
+                _db.IhmEquipmentMachineryReportRows.RemoveRange(oldEquipmentRows);
 
-                var oldSamplingPhotos = await _db.IhmSamplingPhotos
-                    .Where(x => x.SurveyJobId == jobId &&
-                                (x.IhmCheckpointId.HasValue || x.IhmAreaId.HasValue))
+                var existingAreas = await _db.IhmAreas
+                    .Where(x => x.SurveyJobId == jobId)
                     .ToListAsync();
 
-                foreach (var photo in oldSamplingPhotos)
-                {
-                    photo.IhmCheckpointId = null;
-                    photo.IhmAreaId = null;
-                }
-
-                _db.IhmImageMarkers.RemoveRange(oldMarkers);
-                _db.IhmCheckpoints.RemoveRange(oldCheckpoints);
-                _db.IhmAreas.RemoveRange(oldAreas);
-
-                await _db.SaveChangesAsync();
+                var areasByName = existingAreas
+                    .GroupBy(x => NormalizeExcelKey(x.AreaName))
+                    .ToDictionary(x => x.Key, x => x.First());
 
                 foreach (var areaDto in parsed.Areas)
                 {
-                    var area = new IhmArea
-                    {
-                        SurveyJobId = jobId,
-                        AreaName = areaDto.AreaName,
-                        Description = areaDto.Description,
-                        SortOrder = areaDto.SortOrder
-                    };
+                    var areaKey = NormalizeExcelKey(areaDto.AreaName);
 
-                    _db.IhmAreas.Add(area);
-                    await _db.SaveChangesAsync();
+                    if (!areasByName.TryGetValue(areaKey, out var area))
+                    {
+                        area = new IhmArea
+                        {
+                            SurveyJobId = jobId,
+                            AreaName = areaDto.AreaName,
+                            Description = areaDto.Description,
+                            SortOrder = areaDto.SortOrder
+                        };
+
+                        _db.IhmAreas.Add(area);
+                        areasByName[areaKey] = area;
+                    }
+                    else
+                    {
+                        area.Description = areaDto.Description;
+                        area.SortOrder = areaDto.SortOrder;
+                    }
+                }
+
+                await _db.SaveChangesAsync();
+
+                var existingCheckpoints = await _db.IhmCheckpoints
+                    .Where(x => x.SurveyJobId == jobId)
+                    .ToListAsync();
+
+                var checkpointsBySampleNo = existingCheckpoints
+                    .GroupBy(x => NormalizeExcelKey(x.Sample_No))
+                    .ToDictionary(x => x.Key, x => x.First());
+
+                var importedSampleKeys = new HashSet<string>();
+
+                foreach (var areaDto in parsed.Areas)
+                {
+                    var area = areasByName[NormalizeExcelKey(areaDto.AreaName)];
 
                     foreach (var checkpointDto in areaDto.Checkpoints)
                     {
-                        var checkpoint = new IhmCheckpoint
+                        var sampleKey = NormalizeExcelKey(checkpointDto.CheckpointCode);
+                        if (sampleKey.Length == 0 || !importedSampleKeys.Add(sampleKey))
+                            continue;
+
+                        var isNewCheckpoint = !checkpointsBySampleNo.TryGetValue(sampleKey, out var checkpoint);
+
+                        if (isNewCheckpoint)
                         {
-                            SurveyJobId = jobId,
-                            IhmAreaId = area.Id,
+                            checkpoint = new IhmCheckpoint
+                            {
+                                SurveyJobId = jobId,
+                                Result = IhmCheckpointResult.Pending,
+                                Location = checkpointDto.Location,
+                                Remarks = checkpointDto.Remarks
+                            };
 
-                            Sample_No = checkpointDto.CheckpointCode,
-                            Description = checkpointDto.Description,
+                            _db.IhmCheckpoints.Add(checkpoint);
+                            checkpointsBySampleNo[sampleKey] = checkpoint;
+                        }
 
-                            TableType = checkpointDto.TableType,
-                            Location = checkpointDto.Location,
-                            EquipmentName = checkpointDto.EquipmentName,
-                            Component = checkpointDto.Component,
+                        checkpoint.IhmAreaId = area.Id;
+                        checkpoint.Sample_No = checkpointDto.CheckpointCode;
+                        AssignIfProvided(checkpointDto.Description, value => checkpoint.Description = value ?? string.Empty);
+                        AssignIfProvided(checkpointDto.TableType, value => checkpoint.TableType = value);
+                        AssignIfProvided(checkpointDto.EquipmentName, value => checkpoint.EquipmentName = value);
+                        AssignIfProvided(checkpointDto.Component, value => checkpoint.Component = value);
+                        AssignIfProvided(checkpointDto.MaterialCategory, value => checkpoint.Table_A_B = value);
+                        AssignIfProvided(checkpointDto.HazardousMaterial, value => checkpoint.HazardousMaterial = value);
+                        AssignIfProvided(checkpointDto.QuantityUnitKg, value => checkpoint.QuantityUnitKg = value);
+                        AssignIfProvided(checkpointDto.QuantityNo, value => checkpoint.QuantityNo = value);
+                        AssignIfProvided(checkpointDto.QuantityTotalKg, value => checkpoint.QuantityTotalKg = value);
+                        AssignIfProvided(checkpointDto.ManufacturerBrandName, value => checkpoint.ManufacturerBrandName = value);
+                        AssignIfProvided(checkpointDto.DocumentAnalysisResult, value => checkpoint.DocumentAnalysisResult = value);
+                        AssignIfProvided(checkpointDto.SamplingCheck, value => checkpoint.SamplingCheck = value);
+                        AssignIfProvided(checkpointDto.VisualCheck, value => checkpoint.VisualCheck = value);
+                        AssignIfProvided(checkpointDto.CheckResult, value => checkpoint.CheckResult = value);
+                        AssignIfProvided(checkpointDto.Remarks, value => checkpoint.Remarks = value);
+                        checkpoint.SourceRowNumber = checkpointDto.SourceRowNumber;
+                    }
+                }
 
-                            Table_A_B = checkpointDto.MaterialCategory,
-                            HazardousMaterial = checkpointDto.HazardousMaterial,
+                var removedCheckpointIds = existingCheckpoints
+                    .Where(x => !importedSampleKeys.Contains(NormalizeExcelKey(x.Sample_No)))
+                    .Select(x => x.Id)
+                    .ToList();
 
-                            QuantityUnitKg = checkpointDto.QuantityUnitKg,
-                            QuantityNo = checkpointDto.QuantityNo,
-                            QuantityTotalKg = checkpointDto.QuantityTotalKg,
+                if (removedCheckpointIds.Count > 0)
+                {
+                    var removedMarkers = await _db.IhmImageMarkers
+                        .Where(x => x.SurveyJobId == jobId &&
+                                    x.IhmCheckpointId.HasValue &&
+                                    removedCheckpointIds.Contains(x.IhmCheckpointId.Value))
+                        .ToListAsync();
 
-                            ManufacturerBrandName = checkpointDto.ManufacturerBrandName,
-                            DocumentAnalysisResult = checkpointDto.DocumentAnalysisResult,
-                            SamplingCheck = checkpointDto.SamplingCheck,
-                            VisualCheck = checkpointDto.VisualCheck,
-                            CheckResult = checkpointDto.CheckResult,
-                            Remarks = checkpointDto.Remarks,
+                    var removedSamplingPhotos = await _db.IhmSamplingPhotos
+                        .Where(x => x.SurveyJobId == jobId &&
+                                    x.IhmCheckpointId.HasValue &&
+                                    removedCheckpointIds.Contains(x.IhmCheckpointId.Value))
+                        .ToListAsync();
 
-                            SourceRowNumber = checkpointDto.SourceRowNumber,
-                            Result = IhmCheckpointResult.Pending
-                        };
-
-                        _db.IhmCheckpoints.Add(checkpoint);
+                    foreach (var photo in removedSamplingPhotos)
+                    {
+                        photo.IhmCheckpointId = null;
                     }
 
-                    await _db.SaveChangesAsync();
+                    _db.IhmImageMarkers.RemoveRange(removedMarkers);
+                    _db.IhmCheckpoints.RemoveRange(existingCheckpoints.Where(x => removedCheckpointIds.Contains(x.Id)));
                 }
+
+                var reportInfo = await _db.IhmReportInfos
+                    .FirstOrDefaultAsync(x => x.SurveyJobId == jobId);
+
+                if (reportInfo == null)
+                {
+                    reportInfo = new IhmReportInfo
+                    {
+                        SurveyJobId = jobId
+                    };
+                    _db.IhmReportInfos.Add(reportInfo);
+                }
+
+                reportInfo.HazardousMaterialNoFindings =
+                    await BuildDefaultHazardousMaterialNoFindings(jobId);
+
+                await _db.SaveChangesAsync();
 
                 await transaction.CommitAsync();
 
@@ -1336,6 +1412,7 @@ namespace Survey_Certification_App.Controllers
 
             _db.IhmImageMarkers.RemoveRange(markersToDelete);
             await _db.SaveChangesAsync();
+            QueueMarkedImages(marker.SurveyJobId);
 
             return Ok(new
             {
@@ -1424,13 +1501,68 @@ namespace Survey_Certification_App.Controllers
             existingGa.UploadedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
-
             return Ok(new
             {
                 message = "GA layout uploaded successfully.",
                 id = existingGa.Id,
                 jobId = existingGa.SurveyJobId,
                 filePath = existingGa.FilePath
+            });
+        }
+        [HttpPost("jobs/{jobId:int}/marked-images/regenerate")]
+        public IActionResult RegenerateMarkedImages(
+    int jobId,
+    [FromBody] RegenerateMarkedImagesRequest? request)
+        {
+            var force = request?.Force ?? false;
+
+            _markedImageQueue.Queue(
+                jobId,
+                IhmMarkedImageSectionType.Appendix4,
+                force
+            );
+
+            _markedImageQueue.Queue(
+                jobId,
+                IhmMarkedImageSectionType.Hazardous,
+                force
+            );
+
+            return Ok(new
+            {
+                jobId,
+                queued = true,
+                force,
+                message = "Marked image regeneration queued."
+            });
+        }
+
+        [HttpGet("jobs/{jobId:int}/marked-images/status")]
+        public async Task<IActionResult> GetMarkedImageStatus(int jobId)
+        {
+            var items = await _db.IhmMarkedImageMetadata
+                .Where(x => x.SurveyJobId == jobId)
+                .OrderBy(x => x.SectionType)
+                .ThenByDescending(x => x.UpdatedAtUtc)
+                .Select(x => new
+                {
+                    x.SectionType,
+                    x.SourceImagePath,
+                    x.GeneratedImagePath,
+                    x.SourceImageLastModifiedUtc,
+                    x.MarkerDataHash,
+                    x.Status,
+                    x.GeneratedAtUtc,
+                    x.LastQueuedAtUtc,
+                    x.ErrorMessage,
+                    x.RetryCount
+                })
+                .ToListAsync();
+
+            return Ok(new
+            {
+                jobId,
+                items
             });
         }
 
@@ -2024,7 +2156,63 @@ namespace Survey_Certification_App.Controllers
                     x.UpdatedAt
                 })
                 .ToListAsync();
+            var appendix4MarkedImage = await _db.IhmMarkedImageMetadata
+    .Where(x => x.SurveyJobId == jobId &&
+                x.SectionType == IhmMarkedImageSectionType.Appendix4 &&
+                x.Status == IhmMarkedImageStatus.Completed &&
+                x.GeneratedImagePath != null)
+    .OrderByDescending(x => x.GeneratedAtUtc)
+    .Select(x => x.GeneratedImagePath)
+    .FirstOrDefaultAsync();
 
+            if (!string.IsNullOrWhiteSpace(appendix4MarkedImage))
+            {
+                Console.WriteLine($"Using pre-generated marked image. jobId={jobId} section=Appendix4 path={appendix4MarkedImage}");
+            }
+            else
+            {
+                Console.WriteLine($"Marked image missing. jobId={jobId} section=Appendix4");
+            }
+            var hazardousMarkedImage = await _db.IhmMarkedImageMetadata
+                .Where(x => x.SurveyJobId == jobId &&
+                            x.SectionType == IhmMarkedImageSectionType.Hazardous &&
+                            x.Status == IhmMarkedImageStatus.Completed &&
+                            x.GeneratedImagePath != null)
+                .OrderByDescending(x => x.GeneratedAtUtc)
+                .Select(x => x.GeneratedImagePath)
+                .FirstOrDefaultAsync();
+
+            if (!string.IsNullOrWhiteSpace(hazardousMarkedImage))
+            {
+                Console.WriteLine($"Using pre-generated marked image. jobId={jobId} section=Hazardous path={hazardousMarkedImage}");
+            }
+            else
+            {
+                Console.WriteLine($"Marked image missing. jobId={jobId} section=Hazardous");
+                var hazardousStatus = await _db.IhmMarkedImageMetadata
+                    .Where(x => x.SurveyJobId == jobId &&
+                                x.SectionType == IhmMarkedImageSectionType.Hazardous)
+                    .OrderByDescending(x => x.UpdatedAtUtc)
+                    .Select(x => new
+                    {
+                        x.Status,
+                        x.ErrorMessage
+                    })
+                    .FirstOrDefaultAsync();
+
+                var message = hazardousStatus?.Status == IhmMarkedImageStatus.Failed &&
+                              !string.IsNullOrWhiteSpace(hazardousStatus.ErrorMessage)
+                    ? $"Hazardous I-2 marked images are not ready: {hazardousStatus.ErrorMessage}"
+                    : "Hazardous I-2 marked images are still being generated. Please try generating the PDF again after a moment.";
+
+                return Conflict(new
+                {
+                    status = "failed",
+                    message,
+                    section = "Hazardous",
+                    jobId
+                });
+            }
             var outputFolder = Path.Combine(
                 Directory.GetCurrentDirectory(),
                 "wwwroot",
@@ -2160,7 +2348,12 @@ namespace Survey_Certification_App.Controllers
                 Photos = photos,
                 AreaLayouts = areaLayouts,
                 LatestAreaLayout = latestAreaLayout,
-                AreaLayoutPlacements = areaLayoutPlacements
+                AreaLayoutPlacements = areaLayoutPlacements,
+                PreGeneratedMarkedImages = new
+                {
+                    Appendix4 = appendix4MarkedImage,
+                    Hazardous = hazardousMarkedImage
+                }
             };
 
             var scriptPath = Path.Combine(
@@ -2352,7 +2545,7 @@ namespace Survey_Certification_App.Controllers
                 User.FindFirstValue("role");
             var isAdmin = string.Equals(role, "Admin", StringComparison.OrdinalIgnoreCase);
 
-            var canAccess = await CanAccessIhmJobAsync(jobId);
+            var canAccess = await _access.CanAccessReportAsync("ihm", jobId);
 
             if (!canAccess)
                 return Forbid();
@@ -2449,7 +2642,79 @@ namespace Survey_Certification_App.Controllers
             image.RotateFlip(rotateFlip);
         }
 
+        private async Task<string?> BuildDefaultHazardousMaterialNoFindings(int jobId)
+        {
+            var materials = await _db.IhmCheckpoints
+                .AsNoTracking()
+                .Where(x => x.SurveyJobId == jobId &&
+                            x.CheckResult != null &&
+                            x.CheckResult.ToUpper() == "NO")
+                .OrderBy(x => x.Id)
+                .Select(x => x.HazardousMaterial)
+                .ToListAsync();
 
+            var uniqueMaterials = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var material in materials)
+            {
+                foreach (var part in SplitHazardousMaterials(material))
+                {
+                    var key = Regex.Replace(part, @"[^A-Za-z0-9]+", "").ToUpperInvariant();
+
+                    if (key.Length == 0 || !seen.Add(key))
+                        continue;
+
+                    uniqueMaterials.Add(part.Trim());
+                }
+            }
+
+            if (uniqueMaterials.Count == 0)
+                return null;
+
+            return "After the analysis of the collected samples at an accredited laboratory, No " +
+                   JoinWithAnd(uniqueMaterials) +
+                   " and had been detected in samples.";
+        }
+
+        private static IEnumerable<string> SplitHazardousMaterials(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                yield break;
+
+            foreach (var commaPart in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var ampParts = commaPart.Split('&', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+                if (ampParts.Length > 1 && ampParts.All(IsShortCodeMaterial))
+                {
+                    foreach (var ampPart in ampParts)
+                        yield return ampPart;
+                }
+                else
+                {
+                    yield return commaPart.Trim();
+                }
+            }
+        }
+
+        private static bool IsShortCodeMaterial(string value)
+        {
+            var normalized = Regex.Replace(value, @"[^A-Za-z0-9]+", "");
+            return normalized.Length is > 0 and <= 8 &&
+                   normalized.All(ch => !char.IsLetter(ch) || char.IsUpper(ch));
+        }
+
+        private static string JoinWithAnd(IReadOnlyList<string> values)
+        {
+            return values.Count switch
+            {
+                0 => string.Empty,
+                1 => values[0],
+                2 => $"{values[0]} and {values[1]}",
+                _ => $"{string.Join(", ", values.Take(values.Count - 1))} and {values[^1]}"
+            };
+        }
         public class UpdateIhmCheckpointDetailsRequest
         {
             public string SampleNo { get; set; } = string.Empty;
@@ -2719,6 +2984,10 @@ namespace Survey_Certification_App.Controllers
         public decimal HeightPercent { get; set; }
         public decimal Confidence { get; set; }
         public string? Text { get; set; }
+    }
+    public class RegenerateMarkedImagesRequest
+    {
+        public bool Force { get; set; }
     }
     public class CreateIhmMarkerRequest
     {

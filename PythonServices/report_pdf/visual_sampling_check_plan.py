@@ -464,8 +464,28 @@ def start_checkpoint_a3_page(c, page_width, page_height, data):
     return draw_checkpoint_table_header(c, page_width, table_top_y, col_widths)
 
 
+def start_checkpoint_legend_page(c, data):
+    job = data.get("job") or {}
+    vessel = data.get("vessel") or {}
+    report = data.get("reportInfo") or data.get("report") or {}
+
+    vessel_name = vessel.get("vesselName") or job.get("vesselName")
+    company_name = report.get("companyName")
+
+    draw_common_header_footer(
+        c,
+        vessel_name=vessel_name,
+        company_name=company_name,
+        page_no_text="Page | ",
+    )
+
+
 def make_checkpoint_a3_pages(data):
-    checkpoints = get_ihm_checkpoints(data)
+    checkpoints = [
+        checkpoint
+        for checkpoint in get_ihm_checkpoints(data)
+        if any(value not in ("", "-") for value in checkpoint_row_values(checkpoint))
+    ]
     print("IHM CHECKPOINT COUNT:", len(checkpoints))
     if not checkpoints:
         return []
@@ -492,8 +512,8 @@ def make_checkpoint_a3_pages(data):
 
     if legend_y < A3_FOOTER_SAFE_Y:
         c.showPage()
-        y, x_positions = start_checkpoint_a3_page(c, page_width, page_height, data)
-        legend_y = y - 20
+        start_checkpoint_legend_page(c, data)
+        legend_y = page_height - A3_TABLE_TOP_GAP
 
     c.setFont("Times-Roman", 12)
     c.setFillColor(colors.black)

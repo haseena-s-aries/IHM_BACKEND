@@ -298,15 +298,10 @@ public class IhmReportInfoController : ControllerBase
     .FirstOrDefaultAsync(x => x.SurveyJobId == jobId);
         data ??= new IhmReportInfo { SurveyJobId = jobId };
 
-        var displayHazardousMaterialNoFindings = data.HazardousMaterialNoFindings;
+    //    var displayHazardousMaterialNoFindings =
+    //await BuildDefaultHazardousMaterialNoFindings(jobId);
 
-        if (string.IsNullOrWhiteSpace(displayHazardousMaterialNoFindings))
-        {
-            displayHazardousMaterialNoFindings =
-                await BuildDefaultHazardousMaterialNoFindings(jobId);
-        }
-
-        data.HazardousMaterialNoFindings = displayHazardousMaterialNoFindings;
+    //    data.HazardousMaterialNoFindings = displayHazardousMaterialNoFindings;
 
         var revisions = await _db.IhmReportRevisions
             .Where(x => x.SurveyJobId == jobId)
@@ -1018,8 +1013,7 @@ public class IhmReportInfoController : ControllerBase
         existing.RevisionNo = request.RevisionNo;
         existing.LabReportNo = request.LabReportNo;
         existing.LabReportingDate = request.LabReportingDate;
-        existing.HazardousMaterialNoFindings =
-    Merge(request.HazardousMaterialNoFindings, existing.HazardousMaterialNoFindings);
+        existing.HazardousMaterialNoFindings = request.HazardousMaterialNoFindings;
         existing.HazardousMaterialFindings = request.HazardousMaterialFindings;
         existing.ShipManagerContact = request.ShipManagerContact;
         existing.HazmatExpert = request.HazmatExpert;
@@ -1100,6 +1094,8 @@ public class IhmReportInfoController : ControllerBase
         }
         foreach (var item in request.Revisions)
         {
+            if (string.IsNullOrWhiteSpace(item.Description))
+                continue;
             var revision = new IhmReportRevision
             {
                 SurveyJobId = jobId,

@@ -62,9 +62,10 @@ namespace Survey_Certification_App.Data
         public DbSet<IhmAppendixOneResultPoint> IhmAppendixOneResultPoints { get; set; }
         public DbSet<IhmAppendixTwoAttachment> IhmAppendixTwoAttachments { get; set; }
         public DbSet<IhmAreaLayoutPlacement> IhmAreaLayoutPlacements { get; set; }
-
+        public DbSet<IhmMarkedImageMetadata> IhmMarkedImageMetadata { get; set; }
         public DbSet<PdfDynamicEdit> PdfDynamicEdits { get; set; }
         public DbSet<IhmCompany> IhmCompanies { get; set; }
+        public DbSet<ReportAssignment> ReportAssignments { get; set; }
         protected override void OnModelCreating(ModelBuilder modelBuilder)
 
 
@@ -75,7 +76,21 @@ namespace Survey_Certification_App.Data
     .HasIndex(x => x.CompanyName);
             modelBuilder.Entity<IhmCompany>()
     .HasIndex(x => new { x.CompanyName, x.DisplayName, x.Email });
+            modelBuilder.Entity<IhmMarkedImageMetadata>()
+    .HasIndex(x => new
+    {
+        x.SurveyJobId,
+        x.SectionType,
+        x.SourceImagePath
+    });
 
+            modelBuilder.Entity<IhmMarkedImageMetadata>()
+                .Property(x => x.SectionType)
+                .HasConversion<string>();
+
+            modelBuilder.Entity<IhmMarkedImageMetadata>()
+                .Property(x => x.Status)
+                .HasConversion<string>();
             modelBuilder.Entity<PdfDynamicEdit>()
                 .HasIndex(x => new { x.ReportType, x.ReportId });
 
@@ -301,7 +316,31 @@ namespace Survey_Certification_App.Data
             modelBuilder.Entity<ClientVesselMapping>()
                 .HasIndex(x => new { x.UserId, x.VesselId })
                 .IsUnique();
+            modelBuilder.Entity<ReportAssignment>()
+     .HasIndex(x => new { x.ReportType, x.ReportId, x.ClientUserId, x.IsActive });
 
+            modelBuilder.Entity<ReportAssignment>()
+                 .HasIndex(x => new { x.ReportType, x.ReportId, x.ClientUserId })
+                 .IsUnique()
+                 .HasFilter("[IsActive] = 1");
+
+            modelBuilder.Entity<ReportAssignment>()
+                 .HasOne(x => x.ClientUser)
+                 .WithMany()
+                 .HasForeignKey(x => x.ClientUserId)
+                 .OnDelete(DeleteBehavior.NoAction);
+
+            modelBuilder.Entity<ReportAssignment>()
+                 .HasOne(x => x.AssignedByUser)
+                 .WithMany()
+                 .HasForeignKey(x => x.AssignedByUserId)
+                 .OnDelete(DeleteBehavior.NoAction);
+
+            modelBuilder.Entity<ReportAssignment>()
+                 .HasOne(x => x.RevokedByUser)
+                 .WithMany()
+                 .HasForeignKey(x => x.RevokedByUserId)
+                 .OnDelete(DeleteBehavior.NoAction);
             modelBuilder.Entity<Project>().HasData(
                 new Project { Id = 1, Name = "IHM", Code = "IHM", IsActive = true },
                 new Project { Id = 2, Name = "EX Survey", Code = "EX_SURVEY", IsActive = true },
@@ -312,12 +351,12 @@ namespace Survey_Certification_App.Data
                 new ProjectRole { Id = 1, ProjectId = 1, RoleName = "Manager", IsPublicRegistrationAllowed = true },
                 new ProjectRole { Id = 2, ProjectId = 1, RoleName = "Surveyor", IsPublicRegistrationAllowed = true },
                 //new ProjectRole { Id = 3, ProjectId = 1, RoleName = "User", IsPublicRegistrationAllowed = true },
-                new ProjectRole { Id = 4, ProjectId = 1, RoleName = "Client", IsPublicRegistrationAllowed = false },
+                new ProjectRole { Id = 4, ProjectId = 1, RoleName = "Client", IsPublicRegistrationAllowed = true },
 
                 new ProjectRole { Id = 5, ProjectId = 2, RoleName = "Manager", IsPublicRegistrationAllowed = true },
                 new ProjectRole { Id = 6, ProjectId = 2, RoleName = "Surveyor", IsPublicRegistrationAllowed = true },
                 //new ProjectRole { Id = 7, ProjectId = 2, RoleName = "User", IsPublicRegistrationAllowed = true },
-                new ProjectRole { Id = 8, ProjectId = 2, RoleName = "Client", IsPublicRegistrationAllowed = false },
+                new ProjectRole { Id = 8, ProjectId = 2, RoleName = "Client", IsPublicRegistrationAllowed = true },
 
                 new ProjectRole { Id = 9, ProjectId = 3, RoleName = "Manager", IsPublicRegistrationAllowed = true },
                 new ProjectRole { Id = 10, ProjectId = 3, RoleName = "User", IsPublicRegistrationAllowed = true }

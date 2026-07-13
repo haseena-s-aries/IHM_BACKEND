@@ -277,6 +277,9 @@ def build_revision_display_rows(data):
         revision_date = get_revision_value(rev, "revisionDate") or report.get("documentDate")
         description = get_revision_value(rev, "description")
 
+        if not txt(description):
+            continue
+
         prepared = get_revision_value(rev, "preparedBy") or report.get("preparedBy")
         checked = get_revision_value(rev, "checkedBy") or report.get("checkedBy")
         approved = get_revision_value(rev, "approvedBy") or report.get("approvedBy")

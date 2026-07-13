@@ -2,6 +2,7 @@
 using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.Models;
+using Survey_Certification_App.Models.Survey;
 using Survey_Certification_App.Services;
 
 namespace Survey_Certification_App.Controllers
@@ -22,7 +23,19 @@ namespace Survey_Certification_App.Controllers
         {
             if (_access.IsAdmin)
                 return query;
-
+            if (_access.IsSurveyor && _access.UserId.HasValue)
+            {
+                return query.Where(v =>
+                    _db.SurveyJobs.Any(job =>
+                        job.VesselId == v.Id &&
+                        (
+                            job.CreatedByUserId == _access.UserId.Value ||
+                            job.AssignedUserId == _access.UserId.Value ||
+                            job.Assignments.Any(a =>
+                                a.SurveyorUserId == _access.UserId.Value &&
+                                a.Status != SurveyAssignmentStatus.Returned)
+                        )));
+            }
             if (_access.IsClient && _access.UserId.HasValue)
             {
                 return query.Where(v =>

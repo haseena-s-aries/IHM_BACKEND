@@ -1,11 +1,12 @@
 ﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.IemailserviceInterface;
 using Survey_Certification_App.Models;
+using Survey_Certification_App.Services;
 using System.Text;
-using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -132,6 +133,11 @@ builder.Services.AddSwaggerGen(c =>
 // ------------------------------------------------------
 // 6) Other services
 // ------------------------------------------------------
+builder.Services.AddSingleton<IhmMarkedImageQueue>();
+builder.Services.AddSingleton<IIhmMarkedImageQueue>(sp =>
+    sp.GetRequiredService<IhmMarkedImageQueue>());
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<IhmMarkedImageQueue>());
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession();

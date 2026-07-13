@@ -55,35 +55,11 @@ def _cache_image(source_path, data, label):
     return None
 def make_pdf_ready_image(image_path, target_width_pt, target_height_pt, label):
     image_path = Path(image_path)
-    stat = image_path.stat()
-
-    cache_dir = image_path.parent / "pdf-ready-images"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    payload = {
-        "path": str(image_path.resolve()),
-        "mtimeNs": stat.st_mtime_ns,
-        "size": stat.st_size,
-        "targetWidthPt": round(float(target_width_pt), 2),
-        "targetHeightPt": round(float(target_height_pt), 2),
-        "dpi": 150,
-        "label": label,
-    }
-
-    cache_key = hashlib.sha256(
-        json.dumps(payload, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-
-    ready_path = cache_dir / f"{cache_key}.jpg"
-
-    if ready_path.exists():
-        print(f"CACHE HIT pdf-ready image {ready_path}", file=sys.stderr)
-        return ready_path
-
-    print(f"CACHE MISS pdf-ready image {image_path}", file=sys.stderr)
 
     target_w_px = max(1, int(float(target_width_pt) / 72 * 150))
     target_h_px = max(1, int(float(target_height_pt) / 72 * 150))
+
+    ready_path = image_path.parent / f"{image_path.stem}-pdf-ready.tmp.jpg"
 
     with Image.open(image_path) as img:
         img = ImageOps.exif_transpose(img).convert("RGB")
@@ -166,6 +142,7 @@ def make_area_layout_page(image_path, data=None):
     return page
 
 def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None):
+    section_started = time.perf_counter()
     base_dir = Path(__file__).resolve().parent.parent
     project_root = Path(__file__).resolve().parents[2]
     source_pdf = base_dir / "templates" / "report.pdf"
@@ -181,7 +158,25 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
         / str(job_id)
         / "appendix4-ga-marker-map.png"
     )
+    pre_generated_images = (
+        (data or {}).get("preGeneratedMarkedImages")
+        or (data or {}).get("PreGeneratedMarkedImages")
+        or {}
+    )
 
+    pre_generated = (
+        pre_generated_images.get("appendix4")
+        or pre_generated_images.get("Appendix4")
+    )
+    print(f"Appendix4 preGeneratedMarkedImages value={pre_generated}", file=sys.stderr)
+
+    if pre_generated:
+        candidate = project_root / "wwwroot" / Path(str(pre_generated).lstrip("/"))
+        if candidate.exists():
+            print(f"Using pre-generated marked image. section=Appendix4 path={candidate}", file=sys.stderr)
+            map_image = candidate
+        else:
+            print(f"Marked image missing, using fallback. section=Appendix4 path={candidate}", file=sys.stderr)
     if not source_pdf.exists():
         return []
 
@@ -221,6 +216,9 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
 
     image_width = image_right - image_x
     image_height = image_top - image_y
+    print(f"Appendix4 selected main map image={map_image} exists={image_exists}", file=sys.stderr)
+    if not image_exists or map_image.stat().st_size <= 0:
+        raise FileNotFoundError(f"Appendix 4 generated image missing or empty: {map_image}")
 
     if image_exists:
         image_started = time.perf_counter()
@@ -262,7 +260,23 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
         / str(job_id)
     )
 
-    area_images = sorted(report_folder.glob("appendix4-area-*.png"))
+    generated_folder = report_folder / "generated-images"
+    manifest_path = generated_folder / "appendix4-layout-pages.json"
+    area_images = []
+
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for item in manifest:
+                if item.get("kind") == "area" and item.get("fileName"):
+                    candidate = generated_folder / item["fileName"]
+                    if candidate.exists():
+                        area_images.append(candidate)
+        except Exception as exc:
+            print(f"Appendix 4 manifest read failed: {exc}", file=sys.stderr)
+
+    if not area_images:
+        print("Pre-generated Appendix 4 area images missing. Skipping PDF-time fallback.", file=sys.stderr)
 
     for area_image in area_images:
         area_started = time.perf_counter()
@@ -280,5 +294,5 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
 
         if area_page is not None:
             pages.append(area_page)
-
+    print(f"Appendix4 total internal elapsed_ms={int((time.perf_counter() - section_started) * 1000)}", file=sys.stderr)
     return pages
