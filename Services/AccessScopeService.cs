@@ -32,7 +32,15 @@ namespace Survey_Certification_App.Services
         public bool IsAdmin => string.Equals(Role, "Admin", StringComparison.OrdinalIgnoreCase);
         public bool IsManager => string.Equals(Role, "Manager", StringComparison.OrdinalIgnoreCase);
         public bool IsClient => string.Equals(Role, "Client", StringComparison.OrdinalIgnoreCase);
-        public bool IsSurveyor => string.Equals(Role, "Surveyor", StringComparison.OrdinalIgnoreCase);
+
+        public static string? NormalizeReportType(string? type)
+        {
+            var value = (type ?? string.Empty).Trim().ToLowerInvariant();
+            return value is "ihm" or "exsurvey" or "towage" or "seafastening" or "loadout"
+                ? value
+                : null;
+        }
+
         public IQueryable<SurveyJob> FilterJobs(IQueryable<SurveyJob> query)
         {
             if (IsAdmin)
@@ -94,6 +102,124 @@ namespace Survey_Certification_App.Services
                 return query.Where(x => x.ProjectId == ProjectId.Value);
 
             return query.Where(x => false);
+        }
+
+        public async Task<bool> CanManageReportAsync(string reportType, int reportId)
+        {
+            reportType = NormalizeReportType(reportType) ?? string.Empty;
+            if (IsAdmin)
+                return true;
+
+            if (!IsManager || !UserId.HasValue)
+                return false;
+
+            return reportType switch
+            {
+                "ihm" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
+                    x.Id == reportId &&
+                    x.ModuleType == SurveyModuleType.IhmSurvey &&
+                    x.ProjectId == ProjectId &&
+                    (x.CreatedByUserId == UserId.Value ||
+                     x.AssignedManagerId == UserId.Value)),
+                "exsurvey" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
+                    x.Id == reportId &&
+                    x.ModuleType == SurveyModuleType.ExSurvey &&
+                    x.ProjectId == ProjectId &&
+                    (x.CreatedByUserId == UserId.Value ||
+                     x.AssignedManagerId == UserId.Value)),
+                "seafastening" => ProjectId == 3 && await _db.SeaFastenings.AsNoTracking()
+                    .AnyAsync(x => x.Id == reportId && x.UserId == UserId.Value.ToString()),
+                "towage" or "loadout" => false,
+                _ => false
+            };
+        }
+
+        public async Task<bool> CanViewAssignedReportAsync(string reportType, int reportId)
+        {
+            reportType = NormalizeReportType(reportType) ?? string.Empty;
+            return IsClient &&
+                   UserId.HasValue &&
+                   await _db.ReportAssignments.AsNoTracking().AnyAsync(x =>
+                       x.IsActive &&
+                       x.ReportType == reportType &&
+                       x.ReportId == reportId &&
+                       x.ClientUserId == UserId.Value);
+        }
+
+        public async Task<bool> CanAccessReportAsync(string reportType, int reportId)
+        {
+            reportType = NormalizeReportType(reportType) ?? string.Empty;
+            if (IsAdmin)
+                return true;
+
+            if (await CanViewAssignedReportAsync(reportType, reportId))
+                return true;
+
+            if (!UserId.HasValue)
+                return false;
+
+            return reportType switch
+            {
+                "ihm" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
+                    x.Id == reportId &&
+                    x.ModuleType == SurveyModuleType.IhmSurvey &&
+                    (x.CreatedByUserId == UserId.Value ||
+                     x.AssignedManagerId == UserId.Value ||
+                     x.AssignedUserId == UserId.Value ||
+                     x.Assignments.Any(a =>
+                         a.SurveyorUserId == UserId.Value &&
+                         a.Status != SurveyAssignmentStatus.Returned))),
+                "exsurvey" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
+                    x.Id == reportId &&
+                    x.ModuleType == SurveyModuleType.ExSurvey &&
+                    (x.CreatedByUserId == UserId.Value ||
+                     x.AssignedManagerId == UserId.Value ||
+                     x.AssignedUserId == UserId.Value ||
+                     x.Assignments.Any(a =>
+                         a.SurveyorUserId == UserId.Value &&
+                         a.Status != SurveyAssignmentStatus.Returned))),
+                "seafastening" => await _db.SeaFastenings.AsNoTracking().AnyAsync(x =>
+                    x.Id == reportId &&
+                    x.UserId == UserId.Value.ToString()),
+                "towage" or "loadout" => false,
+                _ => false
+            };
+        }
+
+        public async Task<int?> GetReportProjectIdAsync(string reportType, int reportId)
+        {
+            reportType = NormalizeReportType(reportType) ?? string.Empty;
+            if (reportType == "ihm")
+            {
+                var jobProjectId = await _db.SurveyJobs.AsNoTracking()
+                    .Where(x => x.Id == reportId && x.ModuleType == SurveyModuleType.IhmSurvey)
+                    .Select(x => x.ProjectId)
+                    .FirstOrDefaultAsync();
+                return jobProjectId ?? await ResolveProjectIdAsync("IHM");
+            }
+
+            if (reportType == "exsurvey")
+            {
+                var jobProjectId = await _db.SurveyJobs.AsNoTracking()
+                    .Where(x => x.Id == reportId && x.ModuleType == SurveyModuleType.ExSurvey)
+                    .Select(x => x.ProjectId)
+                    .FirstOrDefaultAsync();
+                return jobProjectId ?? await ResolveProjectIdAsync("EX Survey");
+            }
+
+            if (reportType is "towage" or "seafastening" or "loadout")
+                return await ResolveProjectIdAsync("AURAS");
+
+            return null;
+        }
+
+        public async Task<int?> ResolveProjectIdAsync(string projectName)
+        {
+            var normalized = projectName.Trim().ToLower();
+            return await _db.Projects.AsNoTracking()
+                .Where(x => x.IsActive && x.Name.ToLower() == normalized)
+                .Select(x => (int?)x.Id)
+                .FirstOrDefaultAsync();
         }
     }
 }

@@ -414,6 +414,10 @@ namespace Survey_Certification_App.Controllers
                 "towage" => await _db.certificates.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id),
                 "seafastening" => await _db.SeaFastenings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id),
                 "loadout" => await _db.loadoutCertificates.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id),
+                "exsurvey" => await _db.SurveyJobs.AsNoTracking().FirstOrDefaultAsync(x =>
+                    x.Id == id && x.ModuleType == SurveyModuleType.ExSurvey),
+                "ihm" => await _db.SurveyJobs.AsNoTracking().FirstOrDefaultAsync(x =>
+                    x.Id == id && x.ModuleType == SurveyModuleType.IhmSurvey),
                 _ => null
             };
 
@@ -426,6 +430,9 @@ namespace Survey_Certification_App.Controllers
             var currentUserId = GetCurrentUserId();
             var isAdmin = IsCurrentUserAdmin();
             var userIdText = currentUserId?.ToString();
+
+            if (_access.IsClient)
+                return Ok(await GetClientAssignedSavedReportsAsync());
 
             var towageQuery = _db.certificates.AsNoTracking();
             if (!isAdmin && _access.ProjectId != 3)
@@ -492,7 +499,7 @@ namespace Survey_Certification_App.Controllers
     .FilterJobs(_db.SurveyJobs.AsNoTracking())
     .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey);
 
-            
+
 
             var ihmJobs = await ihmJobsQuery
                 .Select(x => new { x.Id, x.VesselName, x.ProjectName, x.JobNumber, x.Status, x.CreatedByUserId, x.CreatedAt })
@@ -533,14 +540,169 @@ namespace Survey_Certification_App.Controllers
                     PdfFilePath = x.PdfPath
                 });
 
-            return Ok(towage
-                .Concat(seaFastening)
-                .Concat(loadout)
-                .Concat(ihmReports)
+            var exJobsQuery = _access
+                .FilterJobs(_db.SurveyJobs.AsNoTracking())
+                .Where(x => x.ModuleType == SurveyModuleType.ExSurvey &&
+                            (x.Status == SurveyJobStatus.ReportGenerated ||
+                             x.Status == SurveyJobStatus.Approved ||
+                             x.Status == SurveyJobStatus.Closed ||
+                             x.Status == SurveyJobStatus.Submitted));
+
+            var exJobs = await exJobsQuery
+                .Select(x => new { x.Id, x.VesselName, x.SiteName, x.ProjectName, x.JobNumber, x.Status, x.CreatedByUserId, x.UpdatedAt, x.CreatedAt })
+                .ToListAsync();
+
+            var exCreatedUserIds = exJobs
+                .Select(x => x.CreatedByUserId)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+            foreach (var id in exCreatedUserIds)
+            {
+                if (!usersById.ContainsKey(id))
+                {
+                    var name = await _db.users.AsNoTracking()
+                        .Where(x => x.Id == id)
+                        .Select(x => x.FullName ?? x.Email ?? $"User {x.Id}")
+                        .FirstOrDefaultAsync();
+                    if (!string.IsNullOrWhiteSpace(name))
+                        usersById[id] = name;
+                }
+            }
+
+            var exReports = exJobs.Select(job => new SavedReportDto
+            {
+                Id = job.Id,
+                ReportType = "exsurvey",
+                Title = string.IsNullOrWhiteSpace(job.ProjectName) ? "EX-Survey Report" : job.ProjectName,
+                VesselName = string.IsNullOrWhiteSpace(job.VesselName) ? job.SiteName : job.VesselName,
+                Reference = job.JobNumber,
+                Status = job.Status.ToString(),
+                CreatedByUserId = job.CreatedByUserId,
+                CreatedBy = usersById.TryGetValue(job.CreatedByUserId, out var creator)
+                    ? creator
+                    : "Not confirmed",
+                SavedAt = job.UpdatedAt ?? job.CreatedAt,
+                ProjectName = job.ProjectName
+            });
+
+            var reports = towage
+       .Concat(seaFastening)
+       .Concat(loadout)
+       .Concat(ihmReports)
+       .Concat(exReports);
+
+            if (!_access.IsAdmin)
+            {
+                var aurasProjectId = await _access.ResolveProjectIdAsync("AURAS");
+                var ihmProjectId = await _access.ResolveProjectIdAsync("IHM");
+                var exProjectId = await _access.ResolveProjectIdAsync("EX Survey");
+
+                // Auras project
+                if (_access.ProjectId == aurasProjectId)
+                {
+                    reports = reports.Where(x =>
+                        x.ReportType == "towage" ||
+                        x.ReportType == "seafastening" ||
+                        x.ReportType == "loadout");
+                }
+                // IHM project
+                else if (_access.ProjectId == ihmProjectId)
+                {
+                    reports = reports.Where(x => x.ReportType == "ihm");
+                }
+                else if (_access.ProjectId == exProjectId)
+                {
+                    reports = reports.Where(x => x.ReportType == "exsurvey");
+                }
+                else
+                {
+                    reports = Enumerable.Empty<SavedReportDto>();
+                }
+            }
+
+            return Ok(reports
                 .OrderByDescending(x => x.SortDate)
                 .ThenByDescending(x => x.Id)
                 .Take(50)
                 .ToList());
+        }
+
+        private async Task<List<SavedReportDto>> GetClientAssignedSavedReportsAsync()
+        {
+            var clientUserId = _access.UserId;
+            if (!clientUserId.HasValue)
+                return new List<SavedReportDto>();
+
+            var assignments = await _db.ReportAssignments
+                .AsNoTracking()
+                .Where(x => x.IsActive && x.ClientUserId == clientUserId.Value)
+                .OrderByDescending(x => x.AssignedAt)
+                .ToListAsync();
+
+            var result = new List<SavedReportDto>();
+            foreach (var assignment in assignments)
+            {
+                if (assignment.ReportType == "ihm")
+                {
+                    var job = await _db.SurveyJobs.AsNoTracking()
+                        .FirstOrDefaultAsync(x =>
+                            x.Id == assignment.ReportId &&
+                            x.ModuleType == SurveyModuleType.IhmSurvey);
+                    if (job == null) continue;
+
+                    result.Add(new SavedReportDto
+                    {
+                        Id = job.Id,
+                        ReportType = "ihm",
+                        Title = string.IsNullOrWhiteSpace(job.ProjectName) ? "IHM Survey Report" : job.ProjectName,
+                        VesselName = job.VesselName,
+                        Reference = job.JobNumber,
+                        Status = job.Status.ToString(),
+                        CreatedByUserId = job.CreatedByUserId,
+                        CreatedBy = await GetUserDisplayNameAsync(job.CreatedByUserId),
+                        ProjectId = job.ProjectId,
+                        ProjectName = job.ProjectName,
+                        SavedAt = assignment.AssignedAt
+                    });
+                }
+                else if (assignment.ReportType == "exsurvey")
+                {
+                    var job = await _db.SurveyJobs.AsNoTracking()
+                        .FirstOrDefaultAsync(x =>
+                            x.Id == assignment.ReportId &&
+                            x.ModuleType == SurveyModuleType.ExSurvey);
+                    if (job == null) continue;
+
+                    result.Add(new SavedReportDto
+                    {
+                        Id = job.Id,
+                        ReportType = "exsurvey",
+                        Title = string.IsNullOrWhiteSpace(job.ProjectName) ? "EX-Survey Report" : job.ProjectName,
+                        VesselName = string.IsNullOrWhiteSpace(job.VesselName) ? job.SiteName : job.VesselName,
+                        Reference = job.JobNumber,
+                        Status = job.Status.ToString(),
+                        CreatedByUserId = job.CreatedByUserId,
+                        CreatedBy = await GetUserDisplayNameAsync(job.CreatedByUserId),
+                        ProjectId = job.ProjectId,
+                        ProjectName = job.ProjectName,
+                        SavedAt = assignment.AssignedAt
+                    });
+                }
+            }
+
+            return result
+                .OrderByDescending(x => x.SortDate)
+                .ThenByDescending(x => x.Id)
+                .ToList();
+        }
+
+        private async Task<string?> GetUserDisplayNameAsync(int userId)
+        {
+            return await _db.users.AsNoTracking()
+                .Where(x => x.Id == userId)
+                .Select(x => x.FullName ?? x.Email ?? $"User {x.Id}")
+                .FirstOrDefaultAsync();
         }
 
         public sealed class SavedReportDto
@@ -760,7 +922,7 @@ namespace Survey_Certification_App.Controllers
         private static string? NormalizeReportType(string? type)
         {
             var value = (type ?? string.Empty).Trim().ToLowerInvariant();
-            return value is "towage" or "seafastening" or "loadout" or "ihm" ? value : null;
+            return value is "towage" or "seafastening" or "loadout" or "ihm" or "exsurvey" ? value : null;
         }
 
         private int? GetCurrentUserId()
@@ -784,32 +946,7 @@ namespace Survey_Certification_App.Controllers
 
         private async Task<bool> CanAccessReportAsync(string type, int id)
         {
-            if (IsCurrentUserAdmin())
-                return true;
-
-            var currentUserId = GetCurrentUserId();
-            if (!currentUserId.HasValue)
-                return false;
-
-            return type switch
-            {
-                "ihm" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
-                    x.Id == id &&
-                    x.ModuleType == SurveyModuleType.IhmSurvey &&
-                    (x.CreatedByUserId == currentUserId.Value ||
-                     x.AssignedManagerId == currentUserId.Value ||
-                     x.AssignedUserId == currentUserId.Value ||
-                     x.Assignments.Any(a =>
-                         a.SurveyorUserId == currentUserId.Value &&
-                         a.Status != SurveyAssignmentStatus.Returned))),
-                "seafastening" => await _db.SeaFastenings.AsNoTracking().AnyAsync(x =>
-                    x.Id == id &&
-                    x.UserId == currentUserId.Value.ToString()),
-                // Towage and loadout do not have persisted creator ownership yet.
-                // Keep manager access closed instead of leaking another user's PDF.
-                "towage" or "loadout" => false,
-                _ => false
-            };
+            return await _access.CanAccessReportAsync(type, id);
         }
 
         // ✅ PLACE THIS HELPER METHOD INSIDE THIS CLASS
