@@ -32,8 +32,7 @@ namespace Survey_Certification_App.Services
         public bool IsAdmin => string.Equals(Role, "Admin", StringComparison.OrdinalIgnoreCase);
         public bool IsManager => string.Equals(Role, "Manager", StringComparison.OrdinalIgnoreCase);
         public bool IsClient => string.Equals(Role, "Client", StringComparison.OrdinalIgnoreCase);
-
-        public bool IsSurveyor { get; internal set; }
+        public bool IsSurveyor => string.Equals(Role, "Surveyor", StringComparison.OrdinalIgnoreCase);
 
         public static string? NormalizeReportType(string? type)
         {
@@ -42,7 +41,6 @@ namespace Survey_Certification_App.Services
                 ? value
                 : null;
         }
-
         public IQueryable<SurveyJob> FilterJobs(IQueryable<SurveyJob> query)
         {
             if (IsAdmin)
