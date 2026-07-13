@@ -33,6 +33,8 @@ namespace Survey_Certification_App.Services
         public bool IsManager => string.Equals(Role, "Manager", StringComparison.OrdinalIgnoreCase);
         public bool IsClient => string.Equals(Role, "Client", StringComparison.OrdinalIgnoreCase);
 
+        public bool IsSurveyor { get; internal set; }
+
         public static string? NormalizeReportType(string? type)
         {
             var value = (type ?? string.Empty).Trim().ToLowerInvariant();
