@@ -3,6 +3,7 @@ using iText.Kernel.Pdf;
 using iText.Layout;
 using iText.Layout.Element;
 using iText.Layout.Properties;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Data;
@@ -573,9 +574,13 @@ namespace Survey_Certification_App.Controllers
             return Ok(new { job.Id, Status = job.Status.ToString() });
         }
 
+        [Authorize]
         [HttpGet("jobs/{jobId:int}/report")]
         public async Task<IActionResult> GenerateReport(int jobId)
         {
+            if (!await _access.CanAccessReportAsync("exsurvey", jobId))
+                return Forbid();
+
             var job = await _db.SurveyJobs.FirstOrDefaultAsync(x =>
                 x.Id == jobId && x.ModuleType == SurveyModuleType.ExSurvey);
             if (job == null)
@@ -700,9 +705,12 @@ namespace Survey_Certification_App.Controllers
                     .SetTextAlignment(TextAlignment.RIGHT));
             }
 
-            job.Status = SurveyJobStatus.ReportGenerated;
-            job.UpdatedAt = DateTime.UtcNow;
-            await _db.SaveChangesAsync();
+            if (!_access.IsClient)
+            {
+                job.Status = SurveyJobStatus.ReportGenerated;
+                job.UpdatedAt = DateTime.UtcNow;
+                await _db.SaveChangesAsync();
+            }
 
             return File(
                 stream.ToArray(),

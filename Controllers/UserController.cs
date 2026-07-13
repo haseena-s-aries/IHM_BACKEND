@@ -37,6 +37,9 @@ namespace Survey_Certification_App.Controllers
             var key = "THIS_SHOULD_BE_A_LONG_RANDOM_SECRET_KEY";
             var issuer = "https://auth.mycompany.com";
             var audience = "my-apps";
+            var effectiveRole = !string.IsNullOrWhiteSpace(user.RoleName)
+                ? user.RoleName.Trim()
+                : user.Role?.Trim() ?? "";
 
             var claims = new[]
             {
@@ -44,13 +47,13 @@ namespace Survey_Certification_App.Controllers
         new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
         new Claim(ClaimTypes.Email, user.Email ?? ""),
         new Claim(ClaimTypes.Name, user.FullName ?? ""),
-        new Claim(ClaimTypes.Role, user.Role ?? ""),
-        new Claim("role", user.Role ?? ""),
+        new Claim(ClaimTypes.Role, effectiveRole),
+        new Claim("role", effectiveRole),
         new Claim("userId", user.Id.ToString()),
         new Claim("projectId", user.ProjectId?.ToString() ?? ""),
         new Claim("projectName", user.ProjectName ?? ""),
         new Claim("roleId", user.RoleId?.ToString() ?? ""),
-        new Claim("roleName", user.RoleName ?? user.Role ?? "")
+        new Claim("roleName", effectiveRole)
     };
 
             var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
@@ -156,6 +159,9 @@ namespace Survey_Certification_App.Controllers
             if (!user.IsApproved)
                 return Unauthorized(new { message = "Your account is pending admin approval." });
 
+            var effectiveRole = !string.IsNullOrWhiteSpace(user.RoleName)
+                ? user.RoleName.Trim()
+                : user.Role?.Trim() ?? "";
             var token = GenerateJwtToken(user);
 
             return Ok(new
@@ -167,11 +173,11 @@ namespace Survey_Certification_App.Controllers
                     id = user.Id,
                     fullName = user.FullName,
                     email = user.Email,
-                    role = user.Role,
+                    role = effectiveRole,
                     projectId = user.ProjectId,
                     projectName = user.ProjectName,
                     roleId = user.RoleId,
-                    roleName = user.RoleName ?? user.Role
+                    roleName = effectiveRole
                 }
             });
         }
@@ -421,7 +427,9 @@ namespace Survey_Certification_App.Controllers
         }
 
         [HttpPost("approve-user/{userId}")]
-        public async Task<IActionResult> ApproveUser(int userId)
+        public async Task<IActionResult> ApproveUser(
+            int userId,
+            [FromBody] ApproveUserRequest? request = null)
         {
             try
             {
@@ -435,8 +443,27 @@ namespace Survey_Certification_App.Controllers
                 if (string.IsNullOrWhiteSpace(user.RequestedRole))
                     return BadRequest(new { message = "Requested role is missing." });
 
-                user.Role = user.RequestedRole;
-                user.RoleName = user.RequestedRole;
+                var approvedProjectId = request?.ProjectId ?? user.ProjectId;
+                if (!approvedProjectId.HasValue || approvedProjectId.Value <= 0)
+                    return BadRequest(new { message = "Please select project before approving user." });
+
+                var project = await _db.Projects.FirstOrDefaultAsync(x =>
+                    x.Id == approvedProjectId.Value &&
+                    x.IsActive);
+                if (project == null)
+                    return BadRequest(new { message = "Selected project is invalid or inactive." });
+
+                var approvedRole = await _db.ProjectRoles.FirstOrDefaultAsync(x =>
+                    x.ProjectId == project.Id &&
+                    x.RoleName == user.RequestedRole);
+                if (approvedRole == null)
+                    return BadRequest(new { message = "Requested role is not available for selected project." });
+
+                user.Role = approvedRole.RoleName;
+                user.RoleName = approvedRole.RoleName;
+                user.RoleId = approvedRole.Id;
+                user.ProjectId = project.Id;
+                user.ProjectName = project.Name;
                 user.RequestedRole = null;
                 user.IsApproved = true;
                 user.IsRejected = false;
@@ -455,6 +482,11 @@ namespace Survey_Certification_App.Controllers
                 return StatusCode(500, $"Internal Server Error: {ex.Message}");
 
             }
+        }
+
+        public class ApproveUserRequest
+        {
+            public int? ProjectId { get; set; }
         }
 
         private async Task SendApprovalEmailAsync(string toEmail, string fullName, string role)

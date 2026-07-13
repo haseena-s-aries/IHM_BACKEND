@@ -4,9 +4,9 @@ using Survey_Certification_App.Data;
 using Survey_Certification_App.IemailserviceInterface;
 using Survey_Certification_App.Models;
 using Survey_Certification_App.Models.Survey;
+using Survey_Certification_App.Services;
 using System.Net;
 using System.Security.Claims;
-using Survey_Certification_App.Services;
 
 namespace Survey_Certification_App.Controllers
 {
@@ -130,7 +130,7 @@ namespace Survey_Certification_App.Controllers
             var currentUserId = GetCurrentUserId();
             if (!currentUserId.HasValue)
                 return Unauthorized("Login is required to create a survey job.");
-           
+
             var createdBy = request.CreatedByUserId ?? currentUserId.Value;
             if (!IsCurrentUserAdmin() && createdBy != currentUserId.Value)
                 return Forbid();
@@ -187,7 +187,7 @@ namespace Survey_Certification_App.Controllers
                 ProjectName = projectName,
                 JobNumber = request.JobNumber.Trim(),
                 ClientName = vessel?.ClientName ?? request.ClientName,
-                
+
                 AuditPort = request.AuditPort,
                 AuditAddress = request.AuditAddress,
 
@@ -622,6 +622,17 @@ namespace Survey_Certification_App.Controllers
             var startOfMonth = new DateTime(today.Year, today.Month, 1);
             var startOfYear = new DateTime(today.Year, 1, 1);
 
+
+            const int IHM_PROJECT_ID = 1;
+            const int EX_SURVEY_PROJECT_ID = 2;
+
+            var ihmUsersCount = await _db.users.CountAsync(x =>
+                x.IsApproved &&
+                x.ProjectId == IHM_PROJECT_ID);
+
+            var exSurveyUsersCount = await _db.users.CountAsync(x =>
+                x.IsApproved &&
+                x.ProjectId == EX_SURVEY_PROJECT_ID);
             // Scope to what the current user (Admin/Manager/Surveyor) can actually see
             var scopedJobs = ApplyJobAccessFilter(_db.SurveyJobs.AsNoTracking());
 
@@ -661,11 +672,20 @@ namespace Survey_Certification_App.Controllers
             var submitted = await activeJobs.CountAsync(x => x.Status == SurveyJobStatus.Submitted);
             var approved = await activeJobs.CountAsync(x => x.Status == SurveyJobStatus.Approved);
 
+
+
             // Was querying the whole table unscoped before — now respects the same access filter
             var returned = await scopedJobs.CountAsync(x => x.Status == SurveyJobStatus.QcReturned);
             var attention = await scopedJobs.CountAsync(x =>
     x.Status == SurveyJobStatus.Assigned &&
     x.SurveyDate == null);
+            var liveIhmJobs = await scopedJobs.CountAsync(x =>
+    x.ModuleType == SurveyModuleType.IhmSurvey &&
+    (
+        x.Status == SurveyJobStatus.InProgress ||
+
+        x.Status == SurveyJobStatus.Assigned
+    ));
             var trend = new List<SurveyCompletionTrendPointDto>();
             var trendMode = string.Equals(period, "month", StringComparison.OrdinalIgnoreCase)
                 ? "month"
@@ -709,12 +729,17 @@ namespace Survey_Certification_App.Controllers
                 ApprovedJobs = approved,
                 ReturnedJobs = returned,
                 AttentionJobs = attention,
+                LiveIhmJobs = liveIhmJobs,
+                IhmUsersCount = ihmUsersCount,
+                ExSurveyUsersCount = exSurveyUsersCount,
                 ThisWeekCompletedJobs = await CountCompletedAsync(startOfWeek),
                 ThisMonthCompletedJobs = await CountCompletedAsync(startOfMonth),
                 ThisYearCompletedJobs = await CountCompletedAsync(startOfYear),
                 OverallCompletedJobs = await CountCompletedAsync(null),
                 CompletionTrend = trend
             });
+
+
         }
 
 
@@ -1089,7 +1114,7 @@ namespace Survey_Certification_App.Controllers
             public string JobNumber { get; set; } = string.Empty;
             public int? VesselId { get; set; }
             public string? ClientName { get; set; }
-   
+
             public string? ProjectName { get; set; }
 
             public string? VesselName { get; set; }
@@ -1246,13 +1271,14 @@ namespace Survey_Certification_App.Controllers
             public int SubmittedJobs { get; set; }
             public int ApprovedJobs { get; set; }
             public int ReturnedJobs { get; set; }
-
+            public int LiveIhmJobs { get; set; }
             public int AttentionJobs { get; set; }
             public int ThisWeekCompletedJobs { get; set; }
             public int ThisMonthCompletedJobs { get; set; }
             public int ThisYearCompletedJobs { get; set; }
             public int OverallCompletedJobs { get; set; }
-
+            public int IhmUsersCount { get; set; }
+            public int ExSurveyUsersCount { get; set; }
             public List<SurveyCompletionTrendPointDto> CompletionTrend { get; set; } = new();
         }
 
