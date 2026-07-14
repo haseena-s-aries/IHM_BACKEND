@@ -2206,30 +2206,8 @@ namespace Survey_Certification_App.Controllers
             }
             else
             {
-                Console.WriteLine($"Marked image missing. jobId={jobId} section=Hazardous");
-                var hazardousStatus = await _db.IhmMarkedImageMetadata
-                    .Where(x => x.SurveyJobId == jobId &&
-                                x.SectionType == IhmMarkedImageSectionType.Hazardous)
-                    .OrderByDescending(x => x.UpdatedAtUtc)
-                    .Select(x => new
-                    {
-                        x.Status,
-                        x.ErrorMessage
-                    })
-                    .FirstOrDefaultAsync();
-
-                var message = hazardousStatus?.Status == IhmMarkedImageStatus.Failed &&
-                              !string.IsNullOrWhiteSpace(hazardousStatus.ErrorMessage)
-                    ? $"Hazardous I-2 marked images are not ready: {hazardousStatus.ErrorMessage}"
-                    : "Hazardous I-2 marked images are still being generated. Please try generating the PDF again after a moment.";
-
-                return Conflict(new
-                {
-                    status = "failed",
-                    message,
-                    section = "Hazardous",
-                    jobId
-                });
+                Console.WriteLine($"Marked image missing. jobId={jobId} section=Hazardous. PDF will continue without hazardous I-2 marked images.");
+                hazardousMarkedImage = null;
             }
             var outputFolder = Path.Combine(
                 Directory.GetCurrentDirectory(),

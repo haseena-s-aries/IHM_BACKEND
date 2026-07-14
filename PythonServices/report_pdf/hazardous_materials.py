@@ -1226,7 +1226,8 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
         else:
             print("Marked image missing, using fallback. section=Hazardous", file=sys.stderr)
 
-    raise FileNotFoundError("Pre-generated hazardous I-2 marked image manifest is missing or empty.")
+    print("Hazardous I-2 marked image manifest missing or empty. Skipping hazardous marked image pages.", file=sys.stderr)
+    return []
 
 def get_rows(data, *keys):
     for key in keys:
