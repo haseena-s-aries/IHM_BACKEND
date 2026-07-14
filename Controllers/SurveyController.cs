@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.IemailserviceInterface;
@@ -742,6 +743,41 @@ namespace Survey_Certification_App.Controllers
 
         }
 
+        [Authorize]
+        [HttpGet("dashboard/my-summary")]
+        public async Task<IActionResult> GetMySurveyorDashboardSummary()
+        {
+            var currentUserId = GetCurrentUserId();
+            if (!currentUserId.HasValue || currentUserId.Value <= 0)
+                return Unauthorized(new { message = "User identity was not found." });
+
+            if (!string.Equals(GetCurrentUserRole(), "Surveyor", StringComparison.OrdinalIgnoreCase))
+                return Forbid();
+
+            var myJobs = _db.SurveyJobs
+                .AsNoTracking()
+                .Where(x =>
+                    x.AssignedUserId == currentUserId.Value ||
+                    x.Assignments.Any(a =>
+                        a.SurveyorUserId == currentUserId.Value &&
+                        a.Status != SurveyAssignmentStatus.Returned));
+
+            var liveJobs = await myJobs.CountAsync(x =>
+                x.Status == SurveyJobStatus.Assigned ||
+                x.Status == SurveyJobStatus.InProgress);
+
+            var completedJobs = await myJobs.CountAsync(x =>
+                x.Status == SurveyJobStatus.Approved ||
+                x.Status == SurveyJobStatus.ReportGenerated ||
+                x.Status == SurveyJobStatus.Closed);
+
+            return Ok(new SurveyorDashboardSummaryDto
+            {
+                LiveJobs = liveJobs,
+                CompletedJobs = completedJobs
+            });
+        }
+
 
         [HttpPost("jobs/{id:int}/assign-surveyors")]
         public async Task<IActionResult> AssignSurveyors(int id, [FromBody] AssignSurveyorsRequest request)
@@ -1286,6 +1322,12 @@ namespace Survey_Certification_App.Controllers
         {
             public string Label { get; set; } = string.Empty;
             public int Count { get; set; }
+        }
+
+        public class SurveyorDashboardSummaryDto
+        {
+            public int LiveJobs { get; set; }
+            public int CompletedJobs { get; set; }
         }
 
     }

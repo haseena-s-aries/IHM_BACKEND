@@ -1540,30 +1540,48 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("jobs/{jobId:int}/marked-images/status")]
         public async Task<IActionResult> GetMarkedImageStatus(int jobId)
         {
-            var items = await _db.IhmMarkedImageMetadata
-                .Where(x => x.SurveyJobId == jobId)
-                .OrderBy(x => x.SectionType)
-                .ThenByDescending(x => x.UpdatedAtUtc)
-                .Select(x => new
+            try
+            {
+                var metadata = await _db.IhmMarkedImageMetadata
+                    .Where(x => x.SurveyJobId == jobId)
+                    .OrderBy(x => x.SectionType)
+                    .ThenByDescending(x => x.UpdatedAtUtc)
+                    .ToListAsync();
+
+                var items = metadata.Select(x => new
                 {
                     x.SectionType,
+                    SectionTypeCode = (int)x.SectionType,
+                    SectionTypeText = x.SectionType.ToString(),
                     x.SourceImagePath,
                     x.GeneratedImagePath,
                     x.SourceImageLastModifiedUtc,
                     x.MarkerDataHash,
                     x.Status,
+                    StatusCode = (int)x.Status,
+                    StatusText = x.Status.ToString(),
                     x.GeneratedAtUtc,
                     x.LastQueuedAtUtc,
                     x.ErrorMessage,
                     x.RetryCount
-                })
-                .ToListAsync();
+                }).ToList();
 
-            return Ok(new
+                return Ok(new
+                {
+                    jobId,
+                    items
+                });
+            }
+            catch
             {
-                jobId,
-                items
-            });
+                return Ok(new
+                {
+                    jobId,
+                    items = Array.Empty<object>(),
+                    statusUnavailable = true,
+                    message = "Marked image status is not initialized yet."
+                });
+            }
         }
 
         [HttpPost("jobs/{jobId:int}/generate-ga-marker-map")]

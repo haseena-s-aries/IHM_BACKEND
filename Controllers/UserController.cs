@@ -614,7 +614,6 @@ namespace Survey_Certification_App.Controllers
         }
 
 
-
         [HttpPost("VerifyOtp")]
         public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpDto model)
         {
