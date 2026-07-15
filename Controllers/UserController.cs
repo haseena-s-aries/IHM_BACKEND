@@ -428,31 +428,70 @@ namespace Survey_Certification_App.Controllers
             try
             {
                 var query = _db.users
-                    .Where(u => u.IsApproved == false && u.RequestedRole != null)
+                    .AsNoTracking()
+                    .Where(u => u.IsApproved == false && u.RequestedRole != null && !u.IsRejected)
                     .AsQueryable();
 
+                List<int>? managedProjectIds = null;
                 if (!_access.IsAdmin)
                 {
-                    var managedProjectIds = _access.ManagedProjectIdQuery();
+                    managedProjectIds = await _access.ManagedProjectIdQuery().ToListAsync();
+                    if (!managedProjectIds.Any())
+                        return Ok(Array.Empty<object>());
+
                     query = query.Where(u =>
-                        u.ProjectId.HasValue &&
-                        managedProjectIds.Contains(u.ProjectId.Value));
+                        (u.ProjectId.HasValue &&
+                         managedProjectIds.Contains(u.ProjectId.Value)) ||
+                        _db.UserProjectAccesses.Any(access =>
+                            access.UserId == u.Id &&
+                            managedProjectIds.Contains(access.ProjectId) &&
+                            !access.IsApproved &&
+                            !access.IsRejected));
                 }
 
-                var pendingUsers = await query
-                    .Select(u => new
-                    {
-                        u.Id,
-                        u.FullName,
-                        u.Email,
-                        u.RequestedRole,
-                        u.ProjectId,
-                        u.ProjectName,
-                        u.RoleId,
-                        u.RoleName,
-
-                    })
+                var users = await query.ToListAsync();
+                var userIds = users.Select(x => x.Id).ToList();
+                var pendingAccessRows = await _db.UserProjectAccesses
+                    .AsNoTracking()
+                    .Include(x => x.Project)
+                    .Where(x =>
+                        userIds.Contains(x.UserId) &&
+                        !x.IsApproved &&
+                        !x.IsRejected)
                     .ToListAsync();
+
+                if (managedProjectIds != null)
+                {
+                    pendingAccessRows = pendingAccessRows
+                        .Where(x => managedProjectIds.Contains(x.ProjectId))
+                        .ToList();
+                }
+
+                var pendingUsers = users
+                    .Select(u =>
+                    {
+                        var scopedAccess = pendingAccessRows
+                            .Where(x => x.UserId == u.Id)
+                            .OrderBy(x => x.ProjectId)
+                            .FirstOrDefault();
+
+                        return new
+                        {
+                            u.Id,
+                            u.FullName,
+                            u.Email,
+                            RequestedRole = scopedAccess?.RoleName ?? u.RequestedRole,
+                            ProjectId = scopedAccess?.ProjectId ?? u.ProjectId,
+                            ProjectName = scopedAccess?.Project?.Name ?? u.ProjectName,
+                            RoleId = scopedAccess?.RoleId ?? u.RoleId,
+                            RoleName = scopedAccess?.RoleName ?? u.RoleName,
+                        };
+                    })
+                    .Where(u =>
+                        _access.IsAdmin ||
+                        (u.ProjectId.HasValue &&
+                         managedProjectIds!.Contains(u.ProjectId.Value)))
+                    .ToList();
 
                 return Ok(pendingUsers);
             }
@@ -593,7 +632,9 @@ namespace Survey_Certification_App.Controllers
 
         [HttpPost("reject-user/{userId}")]
         [Authorize]
-        public async Task<IActionResult> RejectUser(int userId)
+        public async Task<IActionResult> RejectUser(
+            int userId,
+            [FromBody] RejectUserRequest? request = null)
         {
             try
             {
@@ -601,16 +642,38 @@ namespace Survey_Certification_App.Controllers
                 if (user == null)
                     return NotFound("User not found");
 
+                var rejectedProjectId = request?.ProjectId ?? user.ProjectId;
                 if (!_access.IsAdmin)
                 {
-                    if (!user.ProjectId.HasValue ||
-                        !await _access.CanManageProjectAsync(user.ProjectId.Value))
+                    if (!rejectedProjectId.HasValue ||
+                        !await _access.CanManageProjectAsync(rejectedProjectId.Value))
                         return Forbid();
                 }
 
-                user.IsRejected = true;
-                user.IsApproved = false;
-                user.RequestedRole = null;
+                if (rejectedProjectId.HasValue)
+                {
+                    var access = await _db.UserProjectAccesses.FirstOrDefaultAsync(x =>
+                        x.UserId == user.Id &&
+                        x.ProjectId == rejectedProjectId.Value);
+
+                    if (access != null)
+                    {
+                        access.IsRejected = true;
+                        access.IsApproved = false;
+                        access.IsActive = false;
+                        access.UpdatedAtUtc = DateTime.UtcNow;
+                    }
+                }
+
+                if (!user.IsApproved ||
+                    !rejectedProjectId.HasValue ||
+                    user.ProjectId == rejectedProjectId.Value)
+                {
+                    user.IsRejected = true;
+                    user.IsApproved = false;
+                    user.RequestedRole = null;
+                }
+
                 await _db.SaveChangesAsync();
 
                 return Ok("User rejected and removed successfully.");
@@ -619,6 +682,11 @@ namespace Survey_Certification_App.Controllers
             {
                 return StatusCode(500, $"Internal Server Error: {ex.Message}");
             }
+        }
+
+        public class RejectUserRequest
+        {
+            public int? ProjectId { get; set; }
         }
 
         [HttpDelete("delete-user/{userId}")]
