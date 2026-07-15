@@ -740,12 +740,60 @@ namespace Survey_Certification_App.Controllers
                         area.SortOrder = areaDto.SortOrder;
                     }
                 }
-
                 await _db.SaveChangesAsync();
 
                 var existingCheckpoints = await _db.IhmCheckpoints
                     .Where(x => x.SurveyJobId == jobId)
                     .ToListAsync();
+
+                var importedAreaKeys = parsed.Areas
+                    .Select(x => NormalizeExcelKey(x.AreaName))
+                    .Where(x => x.Length > 0)
+                    .ToHashSet();
+
+                var removedAreaIds = existingAreas
+                    .Where(x => !importedAreaKeys.Contains(NormalizeExcelKey(x.AreaName)))
+                    .Select(x => x.Id)
+                    .ToList();
+
+                if (removedAreaIds.Count > 0)
+                {
+                    var removedAreaCheckpointIds = existingCheckpoints
+                        .Where(x => removedAreaIds.Contains(x.IhmAreaId))
+                        .Select(x => x.Id)
+                        .ToList();
+
+                    var removedAreaMarkers = await _db.IhmImageMarkers
+                        .Where(x => x.SurveyJobId == jobId &&
+                                    ((x.IhmAreaId.HasValue && removedAreaIds.Contains(x.IhmAreaId.Value)) ||
+                                     (x.IhmCheckpointId.HasValue && removedAreaCheckpointIds.Contains(x.IhmCheckpointId.Value))))
+                        .ToListAsync();
+
+                    var removedAreaPlacements = await _db.IhmAreaLayoutPlacements
+                        .Where(x => x.SurveyJobId == jobId && removedAreaIds.Contains(x.IhmAreaId))
+                        .ToListAsync();
+
+                    var removedAreaSamplingPhotos = await _db.IhmSamplingPhotos
+                        .Where(x => x.SurveyJobId == jobId &&
+                                    ((x.IhmAreaId.HasValue && removedAreaIds.Contains(x.IhmAreaId.Value)) ||
+                                     (x.IhmCheckpointId.HasValue && removedAreaCheckpointIds.Contains(x.IhmCheckpointId.Value))))
+                        .ToListAsync();
+
+                    foreach (var photo in removedAreaSamplingPhotos)
+                    {
+                        photo.IhmAreaId = null;
+                        photo.IhmCheckpointId = null;
+                    }
+
+                    _db.IhmImageMarkers.RemoveRange(removedAreaMarkers);
+                    _db.IhmAreaLayoutPlacements.RemoveRange(removedAreaPlacements);
+                    _db.IhmCheckpoints.RemoveRange(existingCheckpoints.Where(x => removedAreaCheckpointIds.Contains(x.Id)));
+                    _db.IhmAreas.RemoveRange(existingAreas.Where(x => removedAreaIds.Contains(x.Id)));
+
+                    existingCheckpoints = existingCheckpoints
+                        .Where(x => !removedAreaCheckpointIds.Contains(x.Id))
+                        .ToList();
+                }
 
                 var checkpointsBySampleNo = existingCheckpoints
                     .GroupBy(x => NormalizeExcelKey(x.Sample_No))
@@ -827,7 +875,7 @@ namespace Survey_Certification_App.Controllers
                     _db.IhmImageMarkers.RemoveRange(removedMarkers);
                     _db.IhmCheckpoints.RemoveRange(existingCheckpoints.Where(x => removedCheckpointIds.Contains(x.Id)));
                 }
-
+                await _db.SaveChangesAsync();
                 var reportInfo = await _db.IhmReportInfos
                     .FirstOrDefaultAsync(x => x.SurveyJobId == jobId);
 
