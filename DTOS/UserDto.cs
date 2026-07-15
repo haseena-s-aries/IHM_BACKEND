@@ -28,6 +28,26 @@ namespace Survey_Certification_App.DTOS
 
 
         public string? RequestedRole { get; set; }     // store desired role like "Manager" or "Admin"
+
+        public bool IsRejected { get; set; } = false;
+
+        public bool ReplaceProjectAccesses { get; set; }
+
+        public List<UserProjectAccessDto> ProjectAccesses { get; set; } = new();
+    }
+
+    public class UserProjectAccessDto
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public int ProjectId { get; set; }
+        public string? ProjectName { get; set; }
+        public string? ProjectCode { get; set; }
+        public int? RoleId { get; set; }
+        public string RoleName { get; set; } = string.Empty;
+        public bool IsActive { get; set; } = true;
+        public bool IsApproved { get; set; } = true;
+        public bool IsRejected { get; set; }
     }
 
 

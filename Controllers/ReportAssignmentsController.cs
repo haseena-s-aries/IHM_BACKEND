@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.Models;
 using Survey_Certification_App.Models.Survey;
@@ -29,27 +30,36 @@ namespace Survey_Certification_App.Controllers
             if (!projectId.HasValue)
                 return BadRequest(new { message = "Invalid project type." });
 
-            if (!_access.IsAdmin && (!_access.IsManager || _access.ProjectId != projectId.Value))
+            if (!_access.IsAdmin && !await _access.CanManageProjectAsync(projectId.Value))
                 return Forbid();
 
-            var projectName = await _db.Projects
-                .AsNoTracking()
-                .Where(x => x.Id == projectId.Value)
-                .Select(x => x.Name)
-                .FirstOrDefaultAsync();
+            var projectNameNeedle = (projectType ?? string.Empty).Trim().ToLowerInvariant().StartsWith("ex")
+                ? "ex"
+                : "ihm";
 
             var query = _db.users
                 .AsNoTracking()
                 .Where(x => x.IsApproved && !x.IsRejected)
                 .Where(x =>
-                    (x.Role != null && x.Role.ToLower() == "client") ||
-                    (x.RoleName != null && x.RoleName.ToLower() == "client") ||
-                    (x.RequestedRole != null && x.RequestedRole.ToLower() == "client"))
+                    _db.UserProjectAccesses.Any(access =>
+                        access.UserId == x.Id &&
+                        access.ProjectId == projectId.Value &&
+                        access.IsActive &&
+                        access.IsApproved &&
+                        !access.IsRejected &&
+                        access.RoleName.ToLower() == "client") ||
+                    (x.ProjectId == projectId.Value &&
+                     ((x.Role != null && x.Role.ToLower() == "client") ||
+                      (x.RoleName != null && x.RoleName.ToLower() == "client") ||
+                      (x.RequestedRole != null && x.RequestedRole.ToLower() == "client"))) ||
+                    (x.ProjectName != null &&
+                     x.ProjectName.ToLower().Contains(projectNameNeedle) &&
+                     ((x.Role != null && x.Role.ToLower() == "client") ||
+                      (x.RoleName != null && x.RoleName.ToLower() == "client") ||
+                      (x.RequestedRole != null && x.RequestedRole.ToLower() == "client"))))
                 .Where(x =>
-                    x.ProjectId == projectId.Value ||
-                    (!string.IsNullOrWhiteSpace(projectName) &&
-                     x.ProjectName != null &&
-                     x.ProjectName.ToLower() == projectName.ToLower()));
+                    (x.Role == null || x.Role.ToLower() != "admin") &&
+                    (x.RoleName == null || x.RoleName.ToLower() != "admin"));
 
             if (!string.IsNullOrWhiteSpace(search))
             {
@@ -118,6 +128,10 @@ namespace Survey_Certification_App.Controllers
             if (!_access.UserId.HasValue)
                 return Unauthorized();
 
+            var assignedByUserId = await ResolveAssignedByUserIdAsync();
+            if (!assignedByUserId.HasValue)
+                return Unauthorized(new { message = "Current user could not be resolved. Please login again." });
+
             if (!await ReportExistsAsync(normalizedType, request.ReportId))
                 return NotFound(new { message = "Report not found." });
 
@@ -128,25 +142,63 @@ namespace Survey_Certification_App.Controllers
             if (client == null)
                 return BadRequest(new { message = "Client user not found." });
 
-            if (!client.IsApproved || client.IsRejected ||
-                !(string.Equals(client.Role, "Client", StringComparison.OrdinalIgnoreCase) ||
-                  string.Equals(client.RoleName, "Client", StringComparison.OrdinalIgnoreCase)))
+            if (!client.IsApproved || client.IsRejected)
             {
                 return BadRequest(new { message = "Selected user is not an approved Client." });
             }
 
             var reportProjectId = await _access.GetReportProjectIdAsync(normalizedType, request.ReportId);
-            if (!reportProjectId.HasValue || client.ProjectId != reportProjectId.Value)
+            if (!reportProjectId.HasValue)
+                return BadRequest(new { message = "Report project could not be resolved." });
+
+            var clientHasProjectAccess = await _db.UserProjectAccesses.AsNoTracking().AnyAsync(access =>
+                access.UserId == client.Id &&
+                access.ProjectId == reportProjectId.Value &&
+                access.IsActive &&
+                access.IsApproved &&
+                !access.IsRejected &&
+                access.RoleName.ToLower() == "client");
+
+            var clientHasPrimaryProjectAccess =
+                client.ProjectId == reportProjectId.Value &&
+                (string.Equals(client.Role, "Client", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(client.RoleName, "Client", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(client.RequestedRole, "Client", StringComparison.OrdinalIgnoreCase));
+
+            if (!clientHasProjectAccess && !clientHasPrimaryProjectAccess)
                 return BadRequest(new { message = "Client project does not match the report project." });
 
             var existing = await _db.ReportAssignments.FirstOrDefaultAsync(x =>
-                x.IsActive &&
                 x.ReportType == normalizedType &&
                 x.ReportId == request.ReportId &&
                 x.ClientUserId == request.ClientUserId);
 
-            if (existing != null)
+            if (existing != null && existing.IsActive)
                 return Ok(new { message = "Report is already assigned to this Client.", assignmentId = existing.Id });
+
+            if (existing != null)
+            {
+                existing.AssignedByUserId = assignedByUserId.Value;
+                existing.AssignedAt = DateTime.UtcNow;
+                existing.SurveyJobId = request.SurveyJobId ?? (normalizedType is "ihm" or "exsurvey" ? request.ReportId : null);
+                existing.IsActive = true;
+                existing.RevokedAt = null;
+                existing.RevokedByUserId = null;
+
+                _db.UserNotifications.Add(new UserNotification
+                {
+                    UserId = client.Id,
+                    Type = "ReportAssignment",
+                    Title = "Report assigned",
+                    Message = $"{ToReportLabel(normalizedType)} has been assigned to you.",
+                    SurveyJobId = existing.SurveyJobId,
+                    CreatedAt = DateTime.UtcNow
+                });
+
+                await _db.SaveChangesAsync();
+
+                return Ok(new { message = "Report assigned successfully.", assignmentId = existing.Id });
+            }
 
             var assignment = new ReportAssignment
             {
@@ -154,7 +206,7 @@ namespace Survey_Certification_App.Controllers
                 ReportId = request.ReportId,
                 SurveyJobId = request.SurveyJobId ?? (normalizedType is "ihm" or "exsurvey" ? request.ReportId : null),
                 ClientUserId = request.ClientUserId,
-                AssignedByUserId = _access.UserId.Value,
+                AssignedByUserId = assignedByUserId.Value,
                 AssignedAt = DateTime.UtcNow,
                 IsActive = true
             };
@@ -181,6 +233,10 @@ namespace Survey_Certification_App.Controllers
             if (!_access.UserId.HasValue)
                 return Unauthorized();
 
+            var revokedByUserId = await ResolveAssignedByUserIdAsync();
+            if (!revokedByUserId.HasValue)
+                return Unauthorized(new { message = "Current user could not be resolved. Please login again." });
+
             var assignment = await _db.ReportAssignments.FirstOrDefaultAsync(x => x.Id == assignmentId);
             if (assignment == null || !assignment.IsActive)
                 return NotFound(new { message = "Active assignment not found." });
@@ -190,7 +246,7 @@ namespace Survey_Certification_App.Controllers
 
             assignment.IsActive = false;
             assignment.RevokedAt = DateTime.UtcNow;
-            assignment.RevokedByUserId = _access.UserId.Value;
+            assignment.RevokedByUserId = revokedByUserId.Value;
 
             _db.UserNotifications.Add(new UserNotification
             {
@@ -313,10 +369,58 @@ namespace Survey_Certification_App.Controllers
 
         private async Task<string?> GetUserDisplayNameAsync(int userId)
         {
-            return await _db.users.AsNoTracking()
+            var name = await _db.users.AsNoTracking()
                 .Where(x => x.Id == userId)
                 .Select(x => x.FullName ?? x.Email)
                 .FirstOrDefaultAsync();
+
+            return !string.IsNullOrWhiteSpace(name)
+                ? name
+                : userId > 0 ? $"User {userId}" : null;
+        }
+
+        private async Task<int?> ResolveAssignedByUserIdAsync()
+        {
+            if (_access.UserId.HasValue)
+            {
+                var exists = await _db.users.AsNoTracking()
+                    .AnyAsync(x => x.Id == _access.UserId.Value);
+                if (exists)
+                    return _access.UserId.Value;
+            }
+
+            var email = User.FindFirstValue(ClaimTypes.Email)
+                        ?? User.FindFirstValue("email");
+            if (!string.IsNullOrWhiteSpace(email))
+            {
+                var normalizedEmail = email.Trim().ToLowerInvariant();
+                var userId = await _db.users.AsNoTracking()
+                    .Where(x => x.Email.ToLower() == normalizedEmail)
+                    .Select(x => (int?)x.Id)
+                    .FirstOrDefaultAsync();
+                if (userId.HasValue)
+                    return userId.Value;
+
+                if (_access.IsAdmin && normalizedEmail == "admin@local.com")
+                {
+                    var admin = new User
+                    {
+                        FullName = "Administrator",
+                        Email = normalizedEmail,
+                        Role = "Admin",
+                        RoleName = "Admin",
+                        ProjectName = "All Projects",
+                        IsApproved = true,
+                        IsRejected = false,
+                        PasswordHash = string.Empty
+                    };
+                    _db.users.Add(admin);
+                    await _db.SaveChangesAsync();
+                    return admin.Id;
+                }
+            }
+
+            return null;
         }
 
         private static string ToReportLabel(string reportType) =>

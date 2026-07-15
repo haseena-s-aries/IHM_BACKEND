@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -6,6 +7,7 @@ using Survey_Certification_App.Data;
 using Survey_Certification_App.DTOS;
 using Survey_Certification_App.IemailserviceInterface;
 using Survey_Certification_App.Models;
+using Survey_Certification_App.Services;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Mail;
@@ -23,13 +25,20 @@ namespace Survey_Certification_App.Controllers
         private readonly EmailSettings _emailSettings;
         private readonly SignInManager<User> _signInManager;
         private readonly IWebHostEnvironment _env;
+        private readonly AccessScopeService _access;
 
-        public UserController(ApplicationDbContext db, IEmailService emailService, IConfiguration config, IWebHostEnvironment env)
+        public UserController(
+            ApplicationDbContext db,
+            IEmailService emailService,
+            IConfiguration config,
+            IWebHostEnvironment env,
+            AccessScopeService access)
         {
             _db = db;
             _emailService = emailService ?? throw new ArgumentNullException(nameof(emailService));
             _emailSettings = config.GetSection("EmailSettings").Get<EmailSettings>();
             _env = env;
+            _access = access;
         }
 
         private string GenerateJwtToken(User user)
@@ -86,18 +95,34 @@ namespace Survey_Certification_App.Controllers
 
             if (email == "admin@local.com" && dto.Password == "Admin@123")
             {
-                var staticAdmin = new User
+                var staticAdmin = await _db.users.FirstOrDefaultAsync(u => u.Email.ToLower() == email);
+                if (staticAdmin == null)
                 {
-                    Id = 999999,
-                    FullName = "Static Admin",
-                    Email = "admin@local.com",
-                    Role = "Admin",
-                    RoleName = "Admin",
-                    ProjectId = null,
-                    ProjectName = "All Projects",
-                    IsApproved = true,
-                    PasswordHash = ""
-                };
+                    staticAdmin = new User
+                    {
+                        FullName = "Administrator",
+                        Email = "admin@local.com",
+                        Role = "Admin",
+                        RoleName = "Admin",
+                        ProjectId = null,
+                        ProjectName = "All Projects",
+                        IsApproved = true,
+                        IsRejected = false,
+                        PasswordHash = ""
+                    };
+                    _db.users.Add(staticAdmin);
+                    await _db.SaveChangesAsync();
+                }
+                else if (staticAdmin.RoleName != "Admin" || staticAdmin.Role != "Admin" || !staticAdmin.IsApproved || staticAdmin.IsRejected)
+                {
+                    staticAdmin.Role = "Admin";
+                    staticAdmin.RoleName = "Admin";
+                    staticAdmin.ProjectId = null;
+                    staticAdmin.ProjectName = "All Projects";
+                    staticAdmin.IsApproved = true;
+                    staticAdmin.IsRejected = false;
+                    await _db.SaveChangesAsync();
+                }
 
                 var staticToken = GenerateJwtToken(staticAdmin);
 
@@ -397,12 +422,24 @@ namespace Survey_Certification_App.Controllers
 
 
         [HttpGet("pending-users")]
+        [Authorize]
         public async Task<IActionResult> GetPendingUsers()
         {
             try
             {
-                var pendingUsers = await _db.users
+                var query = _db.users
                     .Where(u => u.IsApproved == false && u.RequestedRole != null)
+                    .AsQueryable();
+
+                if (!_access.IsAdmin)
+                {
+                    var managedProjectIds = _access.ManagedProjectIdQuery();
+                    query = query.Where(u =>
+                        u.ProjectId.HasValue &&
+                        managedProjectIds.Contains(u.ProjectId.Value));
+                }
+
+                var pendingUsers = await query
                     .Select(u => new
                     {
                         u.Id,
@@ -427,6 +464,7 @@ namespace Survey_Certification_App.Controllers
         }
 
         [HttpPost("approve-user/{userId}")]
+        [Authorize]
         public async Task<IActionResult> ApproveUser(
             int userId,
             [FromBody] ApproveUserRequest? request = null)
@@ -443,6 +481,10 @@ namespace Survey_Certification_App.Controllers
                 if (string.IsNullOrWhiteSpace(user.RequestedRole))
                     return BadRequest(new { message = "Requested role is missing." });
 
+                if (!_access.IsAdmin &&
+                    string.Equals(user.RequestedRole, "Admin", StringComparison.OrdinalIgnoreCase))
+                    return Forbid();
+
                 var approvedProjectId = request?.ProjectId ?? user.ProjectId;
                 if (!approvedProjectId.HasValue || approvedProjectId.Value <= 0)
                     return BadRequest(new { message = "Please select project before approving user." });
@@ -452,6 +494,9 @@ namespace Survey_Certification_App.Controllers
                     x.IsActive);
                 if (project == null)
                     return BadRequest(new { message = "Selected project is invalid or inactive." });
+
+                if (!await _access.CanManageProjectAsync(project.Id))
+                    return Forbid();
 
                 var approvedRole = await _db.ProjectRoles.FirstOrDefaultAsync(x =>
                     x.ProjectId == project.Id &&
@@ -468,6 +513,27 @@ namespace Survey_Certification_App.Controllers
                 user.IsApproved = true;
                 user.IsRejected = false;
                 user.ApprovedAt = DateTime.UtcNow;
+
+                var access = await _db.UserProjectAccesses.FirstOrDefaultAsync(x =>
+                    x.UserId == user.Id &&
+                    x.ProjectId == project.Id);
+                if (access == null)
+                {
+                    access = new Models.Access.UserProjectAccess
+                    {
+                        UserId = user.Id,
+                        ProjectId = project.Id,
+                        CreatedAtUtc = DateTime.UtcNow
+                    };
+                    _db.UserProjectAccesses.Add(access);
+                }
+
+                access.RoleId = approvedRole.Id;
+                access.RoleName = approvedRole.RoleName;
+                access.IsActive = true;
+                access.IsApproved = true;
+                access.IsRejected = false;
+                access.UpdatedAtUtc = DateTime.UtcNow;
 
                 await _db.SaveChangesAsync();
 
@@ -526,6 +592,7 @@ namespace Survey_Certification_App.Controllers
 
 
         [HttpPost("reject-user/{userId}")]
+        [Authorize]
         public async Task<IActionResult> RejectUser(int userId)
         {
             try
@@ -533,6 +600,13 @@ namespace Survey_Certification_App.Controllers
                 var user = await _db.users.FindAsync(userId);
                 if (user == null)
                     return NotFound("User not found");
+
+                if (!_access.IsAdmin)
+                {
+                    if (!user.ProjectId.HasValue ||
+                        !await _access.CanManageProjectAsync(user.ProjectId.Value))
+                        return Forbid();
+                }
 
                 user.IsRejected = true;
                 user.IsApproved = false;
@@ -548,11 +622,29 @@ namespace Survey_Certification_App.Controllers
         }
 
         [HttpDelete("delete-user/{userId}")]
+        [Authorize]
         public async Task<IActionResult> DeleteUser(int userId)
         {
             var user = await _db.users.FindAsync(userId);
             if (user == null)
                 return NotFound(new { message = "User not found." });
+
+            if (string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(user.RoleName, "Admin", StringComparison.OrdinalIgnoreCase))
+                return Forbid();
+
+            if (!_access.IsAdmin)
+            {
+                var managedProjectIds = _access.ManagedProjectIdQuery();
+                var canManageUser = (user.ProjectId.HasValue &&
+                                     managedProjectIds.Contains(user.ProjectId.Value)) ||
+                                    await _db.UserProjectAccesses.AnyAsync(access =>
+                                        access.UserId == userId &&
+                                        managedProjectIds.Contains(access.ProjectId));
+
+                if (!canManageUser)
+                    return Forbid();
+            }
 
             var assignments = await _db.SurveyAssignments
                 .Where(x => x.SurveyorUserId == userId || x.AssignedByUserId == userId)

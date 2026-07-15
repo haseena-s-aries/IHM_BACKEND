@@ -5,6 +5,7 @@ using Newtonsoft.Json;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.DTOS;
 using Survey_Certification_App.Models;
+using Survey_Certification_App.Models.Access;
 using Survey_Certification_App.Models.Survey;
 using Survey_Certification_App.Services;
 using System.Security.Claims;
@@ -28,10 +29,36 @@ namespace Survey_Certification_App.Controllers
             _access = access;
         }
 
+        [HttpGet("manageable-projects")]
+        public async Task<IActionResult> GetManageableProjects()
+        {
+            var projects = _db.Projects
+                .AsNoTracking()
+                .Where(x => x.IsActive);
+
+            if (!_access.IsAdmin)
+            {
+                var managedProjectIds = _access.ManagedProjectIdQuery();
+                projects = projects.Where(x => managedProjectIds.Contains(x.Id));
+            }
+
+            var result = await projects
+                .OrderBy(x => x.Name)
+                .Select(x => new
+                {
+                    id = x.Id,
+                    name = x.Name,
+                    code = x.Code
+                })
+                .ToListAsync();
+
+            return Ok(result);
+        }
+
         [HttpGet("projects/{projectId:int}/roles")]
         public async Task<IActionResult> GetProjectRolesForUserManagement(int projectId)
         {
-            if (!_access.IsAdmin && _access.ProjectId != projectId)
+            if (!await _access.CanManageProjectAsync(projectId))
                 return Forbid();
 
             var roles = await _db.ProjectRoles
@@ -51,8 +78,19 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("GetAll")]
         public async Task<IActionResult> GetAllUsers()
         {
-            var users = await _access.FilterUsers(_db.users.AsNoTracking()).ToListAsync();
-            return Ok(users);
+            var scopedUsers = await _access
+                .FilterUsers(_db.users.AsNoTracking())
+                .OrderBy(x => x.FullName)
+                .ToListAsync();
+
+            var userIds = scopedUsers.Select(x => x.Id).ToList();
+            var accessRows = await _db.UserProjectAccesses
+                .AsNoTracking()
+                .Include(x => x.Project)
+                .Where(x => userIds.Contains(x.UserId))
+                .ToListAsync();
+
+            return Ok(scopedUsers.Select(user => ToUserDto(user, accessRows)));
         }
 
         [ApiExplorerSettings(IgnoreApi = true)]
@@ -170,7 +208,12 @@ namespace Survey_Certification_App.Controllers
     .FilterUsers(_db.users.AsNoTracking())
     .FirstOrDefaultAsync(x => x.Id == id);
             if (user == null) return NotFound("User not found");
-            return Ok(user);
+            var accessRows = await _db.UserProjectAccesses
+                .AsNoTracking()
+                .Include(x => x.Project)
+                .Where(x => x.UserId == id)
+                .ToListAsync();
+            return Ok(ToUserDto(user, accessRows));
         }
 
 
@@ -206,52 +249,97 @@ namespace Survey_Certification_App.Controllers
                 return Forbid();
             }
 
-            if (!_access.IsAdmin &&
-                user.ProjectId != _access.ProjectId)
-            {
-                return Forbid();
-            }
             user.FullName = userDto.FullName;
             user.Email = email;
-            user.Role = userDto.Role;
-            user.RoleName = userDto.Role;
+            var selectedRole = userDto.RoleName ?? userDto.Role;
 
-            if (_access.IsAdmin)
+            if (_access.IsAdmin && string.Equals(selectedRole, "Admin", StringComparison.OrdinalIgnoreCase))
             {
-                var selectedRole = userDto.RoleName ?? userDto.Role;
-
-                if (string.Equals(selectedRole, "Admin", StringComparison.OrdinalIgnoreCase))
+                user.ProjectId = null;
+                user.ProjectName = "All Projects";
+                user.Role = "Admin";
+                user.RoleName = "Admin";
+                user.RoleId = userDto.RoleId;
+                var existingAccesses = await _db.UserProjectAccesses
+                    .Where(x => x.UserId == user.Id)
+                    .ToListAsync();
+                _db.UserProjectAccesses.RemoveRange(existingAccesses);
+            }
+            else if (userDto.ReplaceProjectAccesses || HasProjectAccessPayload(userDto))
+            {
+                try
                 {
-                    user.ProjectId = null;
-                    user.ProjectName = "All Projects";
-                    user.Role = "Admin";
-                    user.RoleName = "Admin";
-                    user.RoleId = userDto.RoleId;
+                    var activeAccesses = await ReconcileProjectAccessesAsync(user, userDto.ProjectAccesses);
+                    await ApplyPrimaryProjectAccessAsync(user, activeAccesses);
                 }
-                else
+                catch (UnauthorizedAccessException)
                 {
-                    if (!userDto.ProjectId.HasValue || userDto.ProjectId.Value <= 0)
-                        return BadRequest(new { message = "Invalid project selected." });
-
-                    var project = await _db.Projects
-                        .AsNoTracking()
-                        .FirstOrDefaultAsync(x => x.Id == userDto.ProjectId.Value && x.IsActive);
-
-                    if (project == null)
-                        return BadRequest(new { message = "Invalid project selected." });
-
-                    user.ProjectId = project.Id;
-                    user.ProjectName = project.Name;
-                    user.Role = userDto.Role;
-                    user.RoleName = selectedRole;
-                    user.RoleId = userDto.RoleId;
+                    return Forbid();
                 }
+                catch (InvalidOperationException ex)
+                {
+                    return BadRequest(new { message = ex.Message });
+                }
+            }
+            else if (_access.IsAdmin)
+            {
+                if (!userDto.ProjectId.HasValue || userDto.ProjectId.Value <= 0)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                var project = await _db.Projects
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.Id == userDto.ProjectId.Value && x.IsActive);
+
+                if (project == null)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                var role = await _db.ProjectRoles.FirstOrDefaultAsync(x =>
+                    x.ProjectId == project.Id &&
+                    x.RoleName == selectedRole);
+                if (role == null)
+                    return BadRequest(new { message = "Invalid role selected for this project." });
+
+                await UpsertProjectAccessAsync(user, project, role);
+                user.ProjectId = project.Id;
+                user.ProjectName = project.Name;
+                user.Role = role.RoleName;
+                user.RoleName = role.RoleName;
+                user.RoleId = role.Id;
             }
             else
             {
-                user.ProjectId = _access.ProjectId;
-                user.ProjectName = User.FindFirst("projectName")?.Value ?? user.ProjectName;
-                user.RoleName = userDto.RoleName ?? userDto.Role;
+                if (string.Equals(selectedRole, "Admin", StringComparison.OrdinalIgnoreCase))
+                    return Forbid();
+
+                if (!userDto.ProjectId.HasValue || userDto.ProjectId.Value <= 0)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                if (!await _access.CanManageProjectAsync(userDto.ProjectId.Value))
+                    return Forbid();
+
+                var project = await _db.Projects
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.Id == userDto.ProjectId.Value && x.IsActive);
+                if (project == null)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                var role = await _db.ProjectRoles.FirstOrDefaultAsync(x =>
+                    x.ProjectId == project.Id &&
+                    x.RoleName == selectedRole &&
+                    x.RoleName != "Admin");
+                if (role == null)
+                    return BadRequest(new { message = "Invalid role selected for this project." });
+
+                await UpsertProjectAccessAsync(user, project, role);
+
+                if (!user.ProjectId.HasValue || user.ProjectId == project.Id)
+                {
+                    user.ProjectId = project.Id;
+                    user.ProjectName = project.Name;
+                    user.Role = role.RoleName;
+                    user.RoleName = role.RoleName;
+                    user.RoleId = role.Id;
+                }
             }
             await _db.SaveChangesAsync();
 
@@ -289,6 +377,23 @@ namespace Survey_Certification_App.Controllers
                 userDto.Role = "Admin";
                 userDto.RoleName = "Admin";
             }
+            else if (userDto.ReplaceProjectAccesses || HasProjectAccessPayload(userDto))
+            {
+                var firstAccess = userDto.ProjectAccesses
+                    .Where(x => x.ProjectId > 0)
+                    .GroupBy(x => x.ProjectId)
+                    .Select(x => x.Last())
+                    .FirstOrDefault();
+
+                if (firstAccess == null)
+                    return BadRequest(new { message = "Select at least one project access." });
+
+                userDto.ProjectId = firstAccess.ProjectId;
+                userDto.RoleId = firstAccess.RoleId;
+                userDto.RoleName = firstAccess.RoleName;
+                userDto.Role = firstAccess.RoleName;
+                selectedRole = firstAccess.RoleName;
+            }
 
             var creator = _access.UserId.HasValue
                 ? await _db.users.AsNoTracking().FirstOrDefaultAsync(x => x.Id == _access.UserId.Value)
@@ -296,6 +401,8 @@ namespace Survey_Certification_App.Controllers
 
             int? projectId;
             string? projectName;
+            ProjectRole? projectRole = null;
+            Project? selectedProject = null;
 
             if (_access.IsAdmin && string.Equals(userDto.RoleName ?? userDto.Role, "Admin", StringComparison.OrdinalIgnoreCase))
             {
@@ -314,13 +421,40 @@ namespace Survey_Certification_App.Controllers
                 if (project == null)
                     return BadRequest(new { message = "Invalid project selected." });
 
+                projectRole = await _db.ProjectRoles.FirstOrDefaultAsync(x =>
+                    x.ProjectId == project.Id &&
+                    x.RoleName == selectedRole);
+                if (projectRole == null)
+                    return BadRequest(new { message = "Invalid role selected for this project." });
+
+                selectedProject = project;
                 projectId = project.Id;
                 projectName = project.Name;
             }
             else
             {
-                projectId = creator?.ProjectId;
-                projectName = creator?.ProjectName;
+                if (!userDto.ProjectId.HasValue || userDto.ProjectId.Value <= 0)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                if (!await _access.CanManageProjectAsync(userDto.ProjectId.Value))
+                    return Forbid();
+
+                var project = await _db.Projects
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.Id == userDto.ProjectId.Value && x.IsActive);
+                if (project == null)
+                    return BadRequest(new { message = "Invalid project selected." });
+
+                projectRole = await _db.ProjectRoles.FirstOrDefaultAsync(x =>
+                    x.ProjectId == project.Id &&
+                    x.RoleName == selectedRole &&
+                    x.RoleName != "Admin");
+                if (projectRole == null)
+                    return BadRequest(new { message = "Invalid role selected for this project." });
+
+                selectedProject = project;
+                projectId = project.Id;
+                projectName = project.Name;
             }
 
             if (!_access.IsAdmin && !projectId.HasValue)
@@ -332,7 +466,7 @@ namespace Survey_Certification_App.Controllers
             {
                 FullName = userDto.FullName,
                 Email = userDto.Email.ToLower(),
-                Role = userDto.Role,
+                Role = projectRole?.RoleName ?? userDto.Role,
                 IsApproved = true,
                 RequestedRole = null,
                 IsOtpVerified = true,
@@ -341,12 +475,37 @@ namespace Survey_Certification_App.Controllers
                 ProjectId = projectId,
                 ProjectName = projectName,
                 CreatedByUserId = _access.UserId,
-                RoleId = userDto.RoleId,
-                RoleName = userDto.RoleName ?? userDto.Role
+                RoleId = projectRole?.Id ?? userDto.RoleId,
+                RoleName = projectRole?.RoleName ?? userDto.RoleName ?? userDto.Role
             };
 
             _db.users.Add(user);
             await _db.SaveChangesAsync();
+
+            if (selectedProject != null && projectRole != null)
+            {
+                await UpsertProjectAccessAsync(user, selectedProject, projectRole);
+                await _db.SaveChangesAsync();
+            }
+
+            if (!string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase) &&
+                (userDto.ReplaceProjectAccesses || HasProjectAccessPayload(userDto)))
+            {
+                try
+                {
+                    var activeAccesses = await ReconcileProjectAccessesAsync(user, userDto.ProjectAccesses);
+                    await ApplyPrimaryProjectAccessAsync(user, activeAccesses);
+                    await _db.SaveChangesAsync();
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    return Forbid();
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return BadRequest(new { message = ex.Message });
+                }
+            }
 
             return Ok(new { message = "User created successfully" });
         }
@@ -535,7 +694,7 @@ namespace Survey_Certification_App.Controllers
                     CreatedByUserId = x.Job.CreatedByUserId,
                     CreatedBy = usersById.TryGetValue(x.Job.CreatedByUserId, out var creator)
                         ? creator
-                        : "Not confirmed",
+                        : x.Job.CreatedByUserId > 0 ? $"User {x.Job.CreatedByUserId}" : "Creator unavailable",
                     SavedAt = System.IO.File.GetLastWriteTimeUtc(x.PdfPath),
                     PdfFilePath = x.PdfPath
                 });
@@ -581,7 +740,7 @@ namespace Survey_Certification_App.Controllers
                 CreatedByUserId = job.CreatedByUserId,
                 CreatedBy = usersById.TryGetValue(job.CreatedByUserId, out var creator)
                     ? creator
-                    : "Not confirmed",
+                    : job.CreatedByUserId > 0 ? $"User {job.CreatedByUserId}" : "Creator unavailable",
                 SavedAt = job.UpdatedAt ?? job.CreatedAt,
                 ProjectName = job.ProjectName
             });
@@ -699,10 +858,14 @@ namespace Survey_Certification_App.Controllers
 
         private async Task<string?> GetUserDisplayNameAsync(int userId)
         {
-            return await _db.users.AsNoTracking()
+            var name = await _db.users.AsNoTracking()
                 .Where(x => x.Id == userId)
                 .Select(x => x.FullName ?? x.Email ?? $"User {x.Id}")
                 .FirstOrDefaultAsync();
+
+            return !string.IsNullOrWhiteSpace(name)
+                ? name
+                : userId > 0 ? $"User {userId}" : null;
         }
 
         public sealed class SavedReportDto
@@ -1030,6 +1193,207 @@ namespace Survey_Certification_App.Controllers
             }
 
 
+        }
+
+        private UserDto ToUserDto(User user, IEnumerable<UserProjectAccess> accessRows)
+        {
+            var projectAccesses = accessRows
+                .Where(x => x.UserId == user.Id)
+                .Select(x => new UserProjectAccessDto
+                {
+                    Id = x.Id,
+                    UserId = x.UserId,
+                    ProjectId = x.ProjectId,
+                    ProjectName = x.Project?.Name,
+                    ProjectCode = x.Project?.Code,
+                    RoleId = x.RoleId,
+                    RoleName = x.RoleName,
+                    IsActive = x.IsActive,
+                    IsApproved = x.IsApproved,
+                    IsRejected = x.IsRejected
+                })
+                .ToList();
+
+            if (!projectAccesses.Any() && user.ProjectId.HasValue)
+            {
+                projectAccesses.Add(new UserProjectAccessDto
+                {
+                    UserId = user.Id,
+                    ProjectId = user.ProjectId.Value,
+                    ProjectName = user.ProjectName,
+                    RoleId = user.RoleId,
+                    RoleName = user.RoleName ?? user.Role,
+                    IsActive = true,
+                    IsApproved = user.IsApproved,
+                    IsRejected = user.IsRejected
+                });
+            }
+
+            return new UserDto
+            {
+                Id = user.Id,
+                FullName = user.FullName,
+                Email = user.Email,
+                Role = user.Role,
+                ProjectId = user.ProjectId,
+                ProjectName = user.ProjectName,
+                RoleId = user.RoleId,
+                RoleName = user.RoleName,
+                CreatedByUserId = user.CreatedByUserId,
+                IsApproved = user.IsApproved,
+                IsRejected = user.IsRejected,
+                RequestedRole = user.RequestedRole,
+                ProjectAccesses = projectAccesses
+            };
+        }
+
+        private async Task<UserProjectAccess> UpsertProjectAccessAsync(
+            User user,
+            Project project,
+            ProjectRole role)
+        {
+            var access = await _db.UserProjectAccesses.FirstOrDefaultAsync(x =>
+                x.UserId == user.Id &&
+                x.ProjectId == project.Id);
+
+            if (access == null)
+            {
+                access = new UserProjectAccess
+                {
+                    UserId = user.Id,
+                    ProjectId = project.Id,
+                    CreatedAtUtc = DateTime.UtcNow
+                };
+                _db.UserProjectAccesses.Add(access);
+            }
+
+            access.RoleId = role.Id;
+            access.RoleName = role.RoleName;
+            access.IsActive = true;
+            access.IsApproved = true;
+            access.IsRejected = false;
+            access.UpdatedAtUtc = DateTime.UtcNow;
+
+            return access;
+        }
+
+        private static bool HasProjectAccessPayload(UserDto userDto)
+        {
+            return userDto.ProjectAccesses != null && userDto.ProjectAccesses.Any(x => x.ProjectId > 0);
+        }
+
+        private async Task<List<UserProjectAccess>> ReconcileProjectAccessesAsync(
+            User user,
+            IEnumerable<UserProjectAccessDto>? requestedAccesses)
+        {
+            var requested = (requestedAccesses ?? Enumerable.Empty<UserProjectAccessDto>())
+                .Where(x => x.ProjectId > 0)
+                .GroupBy(x => x.ProjectId)
+                .Select(x => x.Last())
+                .ToList();
+
+            if (!requested.Any())
+                throw new InvalidOperationException("Select at least one project access.");
+
+            var requestedProjectIds = requested.Select(x => x.ProjectId).Distinct().ToList();
+
+            List<int>? manageableProjectIds = null;
+            if (!_access.IsAdmin)
+            {
+                manageableProjectIds = await _access.ManagedProjectIdQuery().ToListAsync();
+                if (requestedProjectIds.Any(projectId => !manageableProjectIds.Contains(projectId)))
+                    throw new UnauthorizedAccessException();
+            }
+
+            var projects = await _db.Projects
+                .Where(x => requestedProjectIds.Contains(x.Id) && x.IsActive)
+                .ToDictionaryAsync(x => x.Id);
+
+            var projectRoles = await _db.ProjectRoles
+                .Where(x => requestedProjectIds.Contains(x.ProjectId))
+                .ToListAsync();
+
+            var existing = await _db.UserProjectAccesses
+                .Where(x => x.UserId == user.Id)
+                .ToListAsync();
+
+            var requestedProjectIdSet = requestedProjectIds.ToHashSet();
+            var removeCandidates = _access.IsAdmin
+                ? existing.Where(x => !requestedProjectIdSet.Contains(x.ProjectId)).ToList()
+                : existing.Where(x =>
+                    manageableProjectIds!.Contains(x.ProjectId) &&
+                    !requestedProjectIdSet.Contains(x.ProjectId)).ToList();
+
+            _db.UserProjectAccesses.RemoveRange(removeCandidates);
+
+            var activeAccesses = new List<UserProjectAccess>();
+            foreach (var requestedAccess in requested)
+            {
+                if (!projects.TryGetValue(requestedAccess.ProjectId, out var project))
+                    throw new InvalidOperationException("Invalid project selected.");
+
+                var role = requestedAccess.RoleId.HasValue && requestedAccess.RoleId.Value > 0
+                    ? projectRoles.FirstOrDefault(x =>
+                        x.Id == requestedAccess.RoleId.Value &&
+                        x.ProjectId == project.Id)
+                    : projectRoles.FirstOrDefault(x =>
+                        x.ProjectId == project.Id &&
+                        x.RoleName == requestedAccess.RoleName);
+
+                if (role == null)
+                    throw new InvalidOperationException($"Invalid role selected for {project.Name}.");
+
+                if (!_access.IsAdmin && string.Equals(role.RoleName, "Admin", StringComparison.OrdinalIgnoreCase))
+                    throw new UnauthorizedAccessException();
+
+                var access = existing.FirstOrDefault(x => x.ProjectId == project.Id);
+                if (access == null)
+                {
+                    access = new UserProjectAccess
+                    {
+                        UserId = user.Id,
+                        ProjectId = project.Id,
+                        CreatedAtUtc = DateTime.UtcNow
+                    };
+                    _db.UserProjectAccesses.Add(access);
+                }
+
+                access.RoleId = role.Id;
+                access.RoleName = role.RoleName;
+                access.IsActive = true;
+                access.IsApproved = true;
+                access.IsRejected = false;
+                access.UpdatedAtUtc = DateTime.UtcNow;
+                activeAccesses.Add(access);
+            }
+
+            return activeAccesses
+                .OrderBy(x => x.ProjectId)
+                .ToList();
+        }
+
+        private async Task ApplyPrimaryProjectAccessAsync(User user, IReadOnlyCollection<UserProjectAccess> activeAccesses)
+        {
+            var primaryAccess = activeAccesses
+                .Where(x => x.IsActive && x.IsApproved && !x.IsRejected)
+                .OrderBy(x => x.ProjectId)
+                .FirstOrDefault();
+
+            if (primaryAccess == null)
+                throw new InvalidOperationException("Select at least one active project access.");
+
+            var project = await _db.Projects
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == primaryAccess.ProjectId);
+
+            user.ProjectId = primaryAccess.ProjectId;
+            user.ProjectName = project?.Name;
+            user.RoleId = primaryAccess.RoleId;
+            user.RoleName = primaryAccess.RoleName;
+            user.Role = primaryAccess.RoleName;
+            user.IsApproved = true;
+            user.IsRejected = false;
+            user.RequestedRole = null;
         }
 
         [HttpGet("fleet-summary")]

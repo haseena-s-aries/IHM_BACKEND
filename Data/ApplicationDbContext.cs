@@ -12,6 +12,7 @@ namespace Survey_Certification_App.Data
         public DbSet<User> users { get; set; }
         public DbSet<Project> Projects { get; set; }
         public DbSet<ProjectRole> ProjectRoles { get; set; }
+        public DbSet<UserProjectAccess> UserProjectAccesses { get; set; }
         public DbSet<ClientVesselMapping> ClientVesselMappings { get; set; }
         public DbSet<RecommendationModel> recommendationModels { get; set; }
 
@@ -312,6 +313,28 @@ namespace Survey_Certification_App.Data
             modelBuilder.Entity<ProjectRole>()
                 .HasIndex(x => new { x.ProjectId, x.RoleName })
                 .IsUnique();
+
+            modelBuilder.Entity<UserProjectAccess>()
+                .HasIndex(x => new { x.UserId, x.ProjectId })
+                .IsUnique();
+
+            modelBuilder.Entity<UserProjectAccess>()
+                .HasOne(x => x.User)
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<UserProjectAccess>()
+                .HasOne(x => x.Project)
+                .WithMany()
+                .HasForeignKey(x => x.ProjectId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            modelBuilder.Entity<UserProjectAccess>()
+                .HasOne(x => x.Role)
+                .WithMany()
+                .HasForeignKey(x => x.RoleId)
+                .OnDelete(DeleteBehavior.NoAction);
 
             modelBuilder.Entity<ClientVesselMapping>()
                 .HasIndex(x => new { x.UserId, x.VesselId })

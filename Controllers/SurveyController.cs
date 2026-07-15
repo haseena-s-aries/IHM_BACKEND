@@ -564,7 +564,9 @@ namespace Survey_Certification_App.Controllers
         public async Task<IActionResult> GetJobs(
          [FromQuery] string? moduleType,
          [FromQuery] SurveyJobStatus? status,
-         [FromQuery] int? assignedSurveyorUserId)
+         [FromQuery] int? assignedSurveyorUserId,
+         [FromQuery] string? ihmCompletionFilter,
+         [FromQuery] string? jobCompletionFilter)
         {
             var query = _db.SurveyJobs
                 .Include(x => x.Assignments)
@@ -596,6 +598,40 @@ namespace Survey_Certification_App.Controllers
                     x.Assignments.Any(a =>
                         a.SurveyorUserId == assignedSurveyorUserId.Value &&
                         a.Status != SurveyAssignmentStatus.Returned));
+            }
+
+            if (!string.IsNullOrWhiteSpace(ihmCompletionFilter))
+            {
+                if (!string.Equals(ihmCompletionFilter, "live", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(ihmCompletionFilter, "completed", StringComparison.OrdinalIgnoreCase))
+                    return BadRequest("Invalid ihmCompletionFilter. Use live or completed.");
+
+                var candidateIds = await query
+                    .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey)
+                    .Select(x => x.Id)
+                    .Distinct()
+                    .ToListAsync();
+
+                var classifications = await BuildIhmAuditClassificationsAsync(candidateIds, logDetails: true);
+                var matchingIds = classifications
+                    .Where(x => string.Equals(ihmCompletionFilter, "completed", StringComparison.OrdinalIgnoreCase)
+                        ? x.IsCompleted
+                        : !x.IsCompleted)
+                    .Select(x => x.JobId)
+                    .ToHashSet();
+
+                query = query.Where(x => matchingIds.Contains(x.Id));
+            }
+
+            if (!string.IsNullOrWhiteSpace(jobCompletionFilter))
+            {
+                if (!string.Equals(jobCompletionFilter, "live", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(jobCompletionFilter, "completed", StringComparison.OrdinalIgnoreCase))
+                    return BadRequest("Invalid jobCompletionFilter. Use live or completed.");
+
+                query = string.Equals(jobCompletionFilter, "completed", StringComparison.OrdinalIgnoreCase)
+                    ? query.Where(x => CompletedSurveyStatuses.Contains(x.Status))
+                    : query.Where(x => !CompletedSurveyStatuses.Contains(x.Status));
             }
 
             var jobs = await query
@@ -680,13 +716,23 @@ namespace Survey_Certification_App.Controllers
             var attention = await scopedJobs.CountAsync(x =>
     x.Status == SurveyJobStatus.Assigned &&
     x.SurveyDate == null);
-            var liveIhmJobs = await scopedJobs.CountAsync(x =>
-    x.ModuleType == SurveyModuleType.IhmSurvey &&
-    (
-        x.Status == SurveyJobStatus.InProgress ||
-
-        x.Status == SurveyJobStatus.Assigned
-    ));
+            var ihmJobIds = await scopedJobs
+                .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey)
+                .Select(x => x.Id)
+                .Distinct()
+                .ToListAsync();
+            var ihmClassifications = await BuildIhmAuditClassificationsAsync(ihmJobIds, logDetails: true);
+            var liveIhmJobs = ihmClassifications.Count(x => !x.IsCompleted);
+            var completedIhmJobs = ihmClassifications.Count(x => x.IsCompleted);
+            var exSurveyLiveJobs = await activeJobs.CountAsync(x =>
+                x.ModuleType == SurveyModuleType.ExSurvey &&
+                !CompletedSurveyStatuses.Contains(x.Status));
+            var exSurveyReports = await activeJobs.CountAsync(x =>
+                x.ModuleType == SurveyModuleType.ExSurvey &&
+                (x.Status == SurveyJobStatus.ReportGenerated ||
+                 x.Status == SurveyJobStatus.Approved ||
+                 x.Status == SurveyJobStatus.Closed ||
+                 x.Status == SurveyJobStatus.Submitted));
             var trend = new List<SurveyCompletionTrendPointDto>();
             var trendMode = string.Equals(period, "month", StringComparison.OrdinalIgnoreCase)
                 ? "month"
@@ -731,6 +777,10 @@ namespace Survey_Certification_App.Controllers
                 ReturnedJobs = returned,
                 AttentionJobs = attention,
                 LiveIhmJobs = liveIhmJobs,
+                IhmLiveJobs = liveIhmJobs,
+                IhmCompletedJobs = completedIhmJobs,
+                ExSurveyLiveJobs = exSurveyLiveJobs,
+                ExSurveyReports = exSurveyReports,
                 IhmUsersCount = ihmUsersCount,
                 ExSurveyUsersCount = exSurveyUsersCount,
                 ThisWeekCompletedJobs = await CountCompletedAsync(startOfWeek),
@@ -757,19 +807,19 @@ namespace Survey_Certification_App.Controllers
             var myJobs = _db.SurveyJobs
                 .AsNoTracking()
                 .Where(x =>
-                    x.AssignedUserId == currentUserId.Value ||
-                    x.Assignments.Any(a =>
-                        a.SurveyorUserId == currentUserId.Value &&
-                        a.Status != SurveyAssignmentStatus.Returned));
+                    x.ModuleType == SurveyModuleType.IhmSurvey &&
+                    (x.AssignedUserId == currentUserId.Value ||
+                     x.Assignments.Any(a =>
+                         a.SurveyorUserId == currentUserId.Value &&
+                         a.Status != SurveyAssignmentStatus.Returned)));
 
-            var liveJobs = await myJobs.CountAsync(x =>
-                x.Status == SurveyJobStatus.Assigned ||
-                x.Status == SurveyJobStatus.InProgress);
-
-            var completedJobs = await myJobs.CountAsync(x =>
-                x.Status == SurveyJobStatus.Approved ||
-                x.Status == SurveyJobStatus.ReportGenerated ||
-                x.Status == SurveyJobStatus.Closed);
+            var myJobIds = await myJobs
+                .Select(x => x.Id)
+                .Distinct()
+                .ToListAsync();
+            var myClassifications = await BuildIhmAuditClassificationsAsync(myJobIds, logDetails: true);
+            var liveJobs = myClassifications.Count(x => !x.IsCompleted);
+            var completedJobs = myClassifications.Count(x => x.IsCompleted);
 
             return Ok(new SurveyorDashboardSummaryDto
             {
@@ -947,6 +997,67 @@ namespace Survey_Certification_App.Controllers
         private IQueryable<SurveyJob> ApplyJobAccessFilter(IQueryable<SurveyJob> query)
         {
             return _access.FilterJobs(query);
+        }
+
+        private async Task<List<IhmAuditJobClassification>> BuildIhmAuditClassificationsAsync(
+            IEnumerable<int> jobIds,
+            bool logDetails = false)
+        {
+            var ids = jobIds
+                .Where(id => id > 0)
+                .Distinct()
+                .ToList();
+
+            if (ids.Count == 0)
+                return new List<IhmAuditJobClassification>();
+
+            var stats = await _db.IhmCheckpoints
+                .AsNoTracking()
+                .Where(x => ids.Contains(x.SurveyJobId))
+                .GroupBy(x => x.SurveyJobId)
+                .Select(group => new
+                {
+                    JobId = group.Key,
+                    Total = group.Count(),
+                    Audited = group.Count(x => x.Result != IhmCheckpointResult.Pending)
+                })
+                .ToListAsync();
+
+            var byJob = stats.ToDictionary(x => x.JobId);
+            var result = new List<IhmAuditJobClassification>(ids.Count);
+
+            foreach (var jobId in ids)
+            {
+                var total = byJob.TryGetValue(jobId, out var stat) ? stat.Total : 0;
+                var audited = byJob.TryGetValue(jobId, out stat) ? stat.Audited : 0;
+                var pending = Math.Max(total - audited, 0);
+                var percentage = total <= 0
+                    ? 0m
+                    : Math.Clamp((decimal)audited * 100m / total, 0m, 100m);
+                var isCompleted = total > 0 && pending == 0;
+
+                if (logDetails)
+                {
+                    _logger.LogInformation(
+                        "IHM area survey classification. JobId={JobId}, TotalAuditItems={Total}, CompletedAuditItems={Audited}, PendingAuditItems={Pending}, Percentage={Percentage}, Classification={Classification}",
+                        jobId,
+                        total,
+                        audited,
+                        pending,
+                        percentage,
+                        isCompleted ? "Completed" : "Live");
+                }
+
+                result.Add(new IhmAuditJobClassification(
+                    jobId,
+                    total,
+                    audited,
+                    pending,
+                    percentage,
+                    isCompleted));
+            }
+
+            return result;
         }
 
         private async Task<bool> CanAccessJobAsync(int jobId)
@@ -1308,6 +1419,10 @@ namespace Survey_Certification_App.Controllers
             public int ApprovedJobs { get; set; }
             public int ReturnedJobs { get; set; }
             public int LiveIhmJobs { get; set; }
+            public int IhmLiveJobs { get; set; }
+            public int IhmCompletedJobs { get; set; }
+            public int ExSurveyLiveJobs { get; set; }
+            public int ExSurveyReports { get; set; }
             public int AttentionJobs { get; set; }
             public int ThisWeekCompletedJobs { get; set; }
             public int ThisMonthCompletedJobs { get; set; }
@@ -1329,6 +1444,14 @@ namespace Survey_Certification_App.Controllers
             public int LiveJobs { get; set; }
             public int CompletedJobs { get; set; }
         }
+
+        private sealed record IhmAuditJobClassification(
+            int JobId,
+            int TotalAuditItems,
+            int CompletedAuditItems,
+            int PendingAuditItems,
+            decimal Percentage,
+            bool IsCompleted);
 
     }
 }
