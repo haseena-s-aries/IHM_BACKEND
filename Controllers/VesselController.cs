@@ -74,10 +74,10 @@ namespace Survey_Certification_App.Controllers
             var vessels = await ApplyVesselReadAccessFilter(_db.Vessels)
                 .Where(x => x.Status == VesselStatus.Active)
                 .OrderBy(x => x.VesselName)
+                .Select(x => ToDto(x))
                 .ToListAsync();
 
-            return Ok(vessels.Select(ToDto));
-
+            return Ok(vessels);
         }
 
         [HttpGet("{id:int}")]

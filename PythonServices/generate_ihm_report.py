@@ -17,7 +17,7 @@ from pypdf._page import PageObject
 from report_pdf.collection_information import make_collection_information_pages
 from report_pdf.hazardous_materials import make_hazardous_materials_a3_page
 
-from report_pdf.helpers import (normalize_keys,register_fonts,extract_page_texts,find_page_by_text_after,merge_page_with_overlay_on_top,replace_template_header_vessel_name,replace_template_footer,FONT_ARIAL,FONT_TIMES, txt, wrap_text_to_lines)
+from report_pdf.helpers import (normalize_keys,register_fonts,extract_page_texts,find_page_by_text_after,merge_page_with_overlay_on_top,replace_template_header_vessel_name,replace_template_footer,FONT_ARIAL,)
 from report_pdf.visual_sampling_check_plan import (
     make_visual_sampling_check_plan_pages,
     make_onboard_visual_sampling_overlay,
@@ -42,130 +42,8 @@ from report_pdf.appendix_five_vessel_documents import make_appendix_five_vessel_
 from report_pdf.appendix_seven_certificates import make_appendix_seven_certificate_pages
 from report_pdf.custom_appendices import make_custom_appendix_pages
 from report_pdf.contents import make_contents_pages
-
 from report_pdf.appendix_four_layout import make_appendix_four_location_plan_pages
-from pypdf.generic import (
-    ArrayObject,
-    DictionaryObject,
-    FloatObject,
-    NameObject,
-    NumberObject,
-)
 
-
-CONTENTS_LEFT_X = 70
-CONTENTS_RIGHT_X = 520
-CONTENTS_TITLE_Y = 755
-CONTENTS_START_Y = 720
-CONTENTS_BOTTOM_Y = 60
-CONTENTS_FONT_SIZE = 12
-
-
-def _content_row_bottom_y(y, number, title, page_no):
-    number = txt(number)
-    title = txt(title).upper()
-    page_text = txt(page_no)
-
-    page_x = CONTENTS_RIGHT_X - pdfmetrics.stringWidth(
-        page_text,
-        FONT_TIMES,
-        CONTENTS_FONT_SIZE,
-    )
-
-    title_x = CONTENTS_LEFT_X + 20 if number else CONTENTS_LEFT_X
-    max_title_width = page_x - title_x - 18
-
-    title_lines = wrap_text_to_lines(
-        title,
-        FONT_TIMES,
-        CONTENTS_FONT_SIZE,
-        max_title_width,
-    )
-
-    return y - (max(len(title_lines), 1) * 16) - 8
-
-
-def collect_contents_links(contents_insert_index, contents_rows, total_pages):
-    if contents_insert_index is None:
-        return []
-
-    links = []
-    contents_page_index = contents_insert_index
-    y = CONTENTS_START_Y
-
-    for row in contents_rows:
-        if y <= CONTENTS_BOTTOM_Y:
-            contents_page_index += 1
-            y = CONTENTS_TITLE_Y
-
-        next_y = _content_row_bottom_y(
-            y,
-            row.get("number"),
-            row.get("title"),
-            row.get("pageNo"),
-        )
-
-        target_page = row.get("pageNo")
-
-        if isinstance(target_page, int) and 0 <= target_page < total_pages:
-            links.append({
-                "contentsPage": contents_page_index,
-                "targetPage": target_page,
-                "rect": [
-                    CONTENTS_LEFT_X,
-                    max(next_y + 4, 0),
-                    CONTENTS_RIGHT_X,
-                    y + 14,
-                ],
-            })
-
-        y = next_y
-
-    return links
-
-
-def add_contents_links(writer, links):
-    for link in links:
-        contents_page = int(link["contentsPage"])
-        target_page = int(link["targetPage"])
-
-        if (
-            contents_page < 0
-            or target_page < 0
-            or contents_page >= len(writer.pages)
-            or target_page >= len(writer.pages)
-        ):
-            continue
-
-        annotation = DictionaryObject()
-        annotation.update({
-            NameObject("/Type"): NameObject("/Annot"),
-            NameObject("/Subtype"): NameObject("/Link"),
-            NameObject("/Rect"): ArrayObject([
-                FloatObject(value)
-                for value in link["rect"]
-            ]),
-            NameObject("/Border"): ArrayObject([
-                NumberObject(0),
-                NumberObject(0),
-                NumberObject(0),
-            ]),
-            NameObject("/A"): DictionaryObject({
-                NameObject("/S"): NameObject("/GoTo"),
-                NameObject("/D"): ArrayObject([
-                    writer.pages[target_page].indirect_reference,
-                    NameObject("/Fit"),
-                ]),
-            }),
-        })
-
-        annotation_ref = writer._add_object(annotation)
-        page = writer.pages[contents_page]
-
-        if "/Annots" in page:
-            page["/Annots"].append(annotation_ref)
-        else:
-            page[NameObject("/Annots")] = ArrayObject([annotation_ref])
 def create_overlay(page_width, page_height, page_index, data, revision_page_index=None, introduction_page_index=None, vessel_particulars_page_index=None):
     packet = BytesIO()
     c = canvas.Canvas(packet, pagesize=(page_width, page_height))
@@ -518,16 +396,9 @@ def main():
    
     visual_sampling_check_plan_page_index = find_page_by_text_after(
         page_texts,
-        "DEVELOPMENT OF VISUAL/SAMPLING CHECK PLAN",
+        "CHEM VI LABORATORY SDN BHD",
         start_page=visual_sampling_search_start
     )
-
-    if visual_sampling_check_plan_page_index is None:
-        visual_sampling_check_plan_page_index = find_page_by_text_after(
-            page_texts,
-            "VISUAL/SAMPLING CHECK PLAN",
-            start_page=visual_sampling_search_start
-        )
     onboard_visual_sampling_search_start = (
         visual_sampling_check_plan_page_index + 1
         if visual_sampling_check_plan_page_index is not None
@@ -738,11 +609,6 @@ def main():
 
         if visual_sampling_check_plan_page_index is not None and page_index == visual_sampling_check_plan_page_index:
             mark_section("visualSamplingPlan")
-
-        if (
-            visual_sampling_check_plan_page_index is not None
-            and page_index == visual_sampling_check_plan_page_index + 1
-        ):
             log_stage("Generating visual sampling check plan pages")
             visual_pages = make_visual_sampling_check_plan_pages(page_width, page_height, data)
 
@@ -1181,15 +1047,9 @@ def main():
             contents_insert_index,
             contents_pages
         )
-        contents_links = collect_contents_links(
-            contents_insert_index,
-            contents_rows,
-            len(writer.pages),
-        )
     log_stage("Renumbering visible footers")
     writer, visible_total_pages = renumber_visible_footers(writer, data, footer_flags)
     writer = add_total_page_count_to_cover(writer, visible_total_pages)
-    add_contents_links(writer, contents_links if contents_insert_index is not None else [])
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
     for page in writer.pages:
