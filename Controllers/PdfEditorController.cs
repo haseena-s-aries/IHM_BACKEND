@@ -314,6 +314,16 @@ public class PdfEditorController : ControllerBase
             return Forbid();
 
         var sourcePath = await GetPdfPath(type, reportId);
+        var outputPdfPath = sourcePath;
+
+        var basePdfPath = Path.Combine(
+            Path.GetDirectoryName(sourcePath)!,
+            "ihm-report-editor-base.pdf");
+
+        if (System.IO.File.Exists(basePdfPath))
+        {
+            sourcePath = basePdfPath;
+        }
 
         if (string.IsNullOrWhiteSpace(sourcePath) ||
 
@@ -474,11 +484,8 @@ public class PdfEditorController : ControllerBase
         }
 
         System.IO.File.Move(
-
             tempOutput,
-
-            sourcePath,
-
+            outputPdfPath!,
             overwrite: true);
 
         return Ok(new
