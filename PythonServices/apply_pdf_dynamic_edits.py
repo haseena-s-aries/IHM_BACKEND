@@ -16,6 +16,7 @@ from pypdf.generic import (
 )
 from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Paragraph
@@ -127,7 +128,12 @@ CONTENTS_FONT_SIZE = 12
 
 def make_style(edit):
     weight = txt(edit.get("fontWeight")).lower()
+    alignment_value = txt(edit.get("alignment")).lower()
 
+    alignment = {
+        "center": TA_CENTER,
+        "right": TA_RIGHT,
+    }.get(alignment_value, TA_LEFT)
     font = {
         "bold": "Times-Bold",
         "italic": "Times-Italic",
@@ -140,6 +146,7 @@ def make_style(edit):
         leading=float(edit.get("fontSize") or 12) * 1.15,
         spaceAfter=0,
         spaceBefore=0,
+        alignment=alignment,
     )
 
 
@@ -191,7 +198,8 @@ def make_overlay(width, height, edit, flowable):
         c.rect(x, y, box_width, box_height, stroke=0, fill=1)
 
     _, rendered_height = flowable.wrap(box_width, box_height)
-    flowable.drawOn(c, x, y + box_height - rendered_height)
+    vertical_offset = max((box_height - rendered_height) / 2, 0)
+    flowable.drawOn(c, x, y + vertical_offset)
 
     c.save()
     packet.seek(0)
