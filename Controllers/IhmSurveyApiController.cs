@@ -1,8 +1,11 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Processing;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.Models.Survey;
 using Survey_Certification_App.Services;
-using Microsoft.EntityFrameworkCore;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
@@ -11,9 +14,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Jpeg;
-using SixLabors.ImageSharp.Processing;
 using ImageSharpImage = SixLabors.ImageSharp.Image;
 
 namespace Survey_Certification_App.Controllers
@@ -22,6 +22,7 @@ namespace Survey_Certification_App.Controllers
     [ApiController]
     public class IhmSurveyApiController : ControllerBase
     {
+        private const string VscpChecklistFileType = "VscpChecklistTemplate";
         private static readonly ConcurrentDictionary<int, IhmPdfJobState> IhmPdfJobs = new();
 
         private sealed class IhmPdfJobState
@@ -643,6 +644,13 @@ namespace Survey_Certification_App.Controllers
 
                 var storedFileName = $"{jobId}_{Guid.NewGuid()}{extension}";
                 var filePath = Path.Combine(uploadFolder, storedFileName);
+                var relativeExcelPath = $"/uploads/ihm-excel/{storedFileName}";
+                var previousChecklist = await _db.SurveyUploadedFiles
+                    .Where(x => x.SurveyJobId == jobId && x.FileType == VscpChecklistFileType)
+                    .OrderByDescending(x => x.UploadedAt)
+                    .FirstOrDefaultAsync();
+                var previousChecklistPath = previousChecklist?.FilePath
+                    ?? FindLatestLegacyVscpChecklistPath(jobId);
 
                 await using (var stream = new FileStream(filePath, FileMode.Create))
                 {
@@ -894,9 +902,29 @@ namespace Survey_Certification_App.Controllers
                 reportInfo.HazardousMaterialNoFindings =
                     await BuildDefaultHazardousMaterialNoFindings(jobId);
 
+                if (previousChecklist == null)
+                {
+                    previousChecklist = new SurveyUploadedFile
+                    {
+                        SurveyJobId = jobId,
+                        FileType = VscpChecklistFileType
+                    };
+                    _db.SurveyUploadedFiles.Add(previousChecklist);
+                }
+
+                previousChecklist.OriginalFileName = file.FileName;
+                previousChecklist.StoredFileName = storedFileName;
+                previousChecklist.FilePath = relativeExcelPath;
+                previousChecklist.ContentType = file.ContentType;
+                previousChecklist.SizeBytes = file.Length;
+                previousChecklist.UploadedByUserId = GetCurrentUserId() ?? 0;
+                previousChecklist.UploadedAt = DateTime.UtcNow;
+
                 await _db.SaveChangesAsync();
 
                 await transaction.CommitAsync();
+
+                DeleteOldVscpChecklistFile(previousChecklistPath, relativeExcelPath);
 
                 return Ok(new
                 {
@@ -2520,6 +2548,13 @@ namespace Survey_Certification_App.Controllers
                     if (System.IO.File.Exists(outputPdfPath))
                         System.IO.File.Delete(outputPdfPath);
 
+                    var basePdfPath = Path.Combine(outputFolder, "ihm-report-editor-base.pdf");
+
+                    if (!System.IO.File.Exists(basePdfPath))
+                    {
+                        System.IO.File.Copy(tempOutputPdfPath, basePdfPath, overwrite: false);
+                    }
+
                     System.IO.File.Move(tempOutputPdfPath, outputPdfPath);
 
                     IhmPdfJobs[jobId] = new IhmPdfJobState
@@ -2611,6 +2646,49 @@ namespace Survey_Certification_App.Controllers
 
             return PhysicalFile(pdfPath, "application/pdf", $"ihm-report-{jobId}.pdf");
         }
+
+        [HttpGet("jobs/{jobId:int}/vscp-checklist")]
+        public async Task<IActionResult> GetVscpChecklist(int jobId)
+        {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return Forbid();
+
+            var checklist = await _db.SurveyUploadedFiles
+                .AsNoTracking()
+                .Where(x => x.SurveyJobId == jobId && x.FileType == VscpChecklistFileType)
+                .OrderByDescending(x => x.UploadedAt)
+                .FirstOrDefaultAsync();
+
+            if (checklist == null || string.IsNullOrWhiteSpace(checklist.FilePath))
+            {
+                var legacyChecklistPath = FindLatestLegacyVscpChecklistPath(jobId);
+                if (string.IsNullOrWhiteSpace(legacyChecklistPath))
+                    return NotFound("VSCP Checklist Template not found.");
+
+                var legacyFullPath = ToWebRootPath(legacyChecklistPath);
+                if (!System.IO.File.Exists(legacyFullPath))
+                    return NotFound("VSCP Checklist Template file not found.");
+
+                return PhysicalFile(
+                    legacyFullPath,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    Path.GetFileName(legacyFullPath));
+            }
+
+            var fullPath = ToWebRootPath(checklist.FilePath);
+            if (!System.IO.File.Exists(fullPath))
+                return NotFound("VSCP Checklist Template file not found.");
+
+            var fileName = string.IsNullOrWhiteSpace(checklist.OriginalFileName)
+                ? $"vscp-checklist-{jobId}.xlsx"
+                : checklist.OriginalFileName;
+
+            return PhysicalFile(
+                fullPath,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                fileName);
+        }
+
         private async Task ConvertPdfFirstPageToImageAsync(string pdfPath, string outputImagePath)
         {
             var scriptPath = Path.Combine(
@@ -2639,6 +2717,61 @@ namespace Survey_Certification_App.Controllers
             if (process.ExitCode != 0)
                 throw new InvalidOperationException("PDF to image conversion failed: " + error);
         }
+
+        private static string ToWebRootPath(string relativePath)
+        {
+            return Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "wwwroot",
+                relativePath.TrimStart('/', '\\').Replace('/', Path.DirectorySeparatorChar));
+        }
+
+        private static void DeleteOldVscpChecklistFile(string? oldRelativePath, string newRelativePath)
+        {
+            if (string.IsNullOrWhiteSpace(oldRelativePath) ||
+                string.Equals(oldRelativePath, newRelativePath, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var oldFullPath = ToWebRootPath(oldRelativePath);
+            var uploadRoot = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "wwwroot",
+                "uploads",
+                "ihm-excel");
+
+            var resolvedOldPath = Path.GetFullPath(oldFullPath);
+            var resolvedUploadRoot = Path.GetFullPath(uploadRoot);
+            var relativeOldPath = Path.GetRelativePath(resolvedUploadRoot, resolvedOldPath);
+
+            if (relativeOldPath.StartsWith("..", StringComparison.Ordinal) ||
+                Path.IsPathRooted(relativeOldPath))
+                return;
+
+            if (System.IO.File.Exists(resolvedOldPath))
+                System.IO.File.Delete(resolvedOldPath);
+        }
+
+        private static string? FindLatestLegacyVscpChecklistPath(int jobId)
+        {
+            var uploadRoot = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "wwwroot",
+                "uploads",
+                "ihm-excel");
+
+            if (!Directory.Exists(uploadRoot))
+                return null;
+
+            var latestFile = Directory.EnumerateFiles(uploadRoot, $"{jobId}_*.xlsx")
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .FirstOrDefault();
+
+            return latestFile == null
+                ? null
+                : $"/uploads/ihm-excel/{latestFile.Name}";
+        }
+
         private static async Task SaveCompressedPhotoAsync(IFormFile file, string outputPath)
         {
             await using var inputStream = file.OpenReadStream();

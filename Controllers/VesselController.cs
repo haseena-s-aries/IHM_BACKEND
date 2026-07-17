@@ -21,26 +21,9 @@ namespace Survey_Certification_App.Controllers
         }
         private IQueryable<Vessel> ApplyVesselReadAccessFilter(IQueryable<Vessel> query)
         {
-            return query;
-        }
-
-        private IQueryable<Vessel> ApplyVesselWriteAccessFilter(IQueryable<Vessel> query)
-        {
             if (_access.IsAdmin)
                 return query;
-            if (_access.IsSurveyor && _access.UserId.HasValue)
-            {
-                return query.Where(v =>
-                    _db.SurveyJobs.Any(job =>
-                        job.VesselId == v.Id &&
-                        (
-                            job.CreatedByUserId == _access.UserId.Value ||
-                            job.AssignedUserId == _access.UserId.Value ||
-                            job.Assignments.Any(a =>
-                                a.SurveyorUserId == _access.UserId.Value &&
-                                a.Status != SurveyAssignmentStatus.Returned)
-                        )));
-            }
+
             if (_access.IsClient && _access.UserId.HasValue)
             {
                 return query.Where(v =>
@@ -49,11 +32,38 @@ namespace Survey_Certification_App.Controllers
                         m.VesselId == v.Id));
             }
 
-            if (_access.UserId.HasValue && _access.ProjectId.HasValue)
+            if (_access.IsSurveyor && _access.UserId.HasValue)
             {
                 return query.Where(v =>
-                    v.ProjectId == _access.ProjectId.Value &&
+                    _db.SurveyJobs.Any(job =>
+                        job.VesselId == v.Id &&
+                        (
+                            job.AssignedUserId == _access.UserId.Value ||
+                            job.Assignments.Any(a =>
+                                a.SurveyorUserId == _access.UserId.Value &&
+                                a.Status != SurveyAssignmentStatus.Returned)
+                        )));
+            }
+
+            if (_access.IsManager && _access.UserId.HasValue)
+            {
+                var managedProjectIds = _access.ManagedProjectIdQuery();
+                return query.Where(v =>
+                    (v.ProjectId.HasValue && managedProjectIds.Contains(v.ProjectId.Value)) ||
                     v.CreatedByUserId == _access.UserId.Value);
+            }
+
+            return query.Where(v => false);
+        }
+
+        private IQueryable<Vessel> ApplyVesselWriteAccessFilter(IQueryable<Vessel> query)
+        {
+            if (_access.IsAdmin)
+                return query;
+
+            if (_access.IsManager && _access.UserId.HasValue)
+            {
+                return query.Where(v => v.CreatedByUserId == _access.UserId.Value);
             }
 
             return query.Where(v => false);
@@ -85,8 +95,12 @@ namespace Survey_Certification_App.Controllers
         [HttpPost]
         public async Task<IActionResult> Create([FromBody] SaveVesselRequest request)
         {
-            if (_access.IsClient)
+            if (!_access.UserId.HasValue)
+                return Unauthorized("Login is required to create a vessel.");
+
+            if (!_access.IsAdmin && !_access.IsManager)
                 return Forbid();
+
             if (string.IsNullOrWhiteSpace(request.VesselName))
                 return BadRequest("Vessel name is required.");
 
@@ -116,6 +130,7 @@ namespace Survey_Certification_App.Controllers
                 DateOfBuild = request.DateOfBuild,
                 LengthBetweenPerpendiculars = request.LengthBetweenPerpendiculars,
                 DraughtMoulded = request.DraughtMoulded,
+                CreatedByUserId = _access.UserId.Value,
             };
             if (!_access.IsAdmin)
             {
@@ -124,7 +139,6 @@ namespace Survey_Certification_App.Controllers
 
                 vessel.ProjectId = _access.ProjectId.Value;
                 vessel.ProjectName = User.FindFirst("projectName")?.Value;
-                vessel.CreatedByUserId = _access.UserId.Value;
             }
             else
             {
@@ -143,8 +157,6 @@ namespace Survey_Certification_App.Controllers
                     vessel.ProjectId = null;
                     vessel.ProjectName = null;
                 }
-
-                vessel.CreatedByUserId = _access.UserId;
             }
 
             _db.Vessels.Add(vessel);
@@ -156,8 +168,9 @@ namespace Survey_Certification_App.Controllers
         [HttpPut("{id:int}")]
         public async Task<IActionResult> Update(int id, [FromBody] SaveVesselRequest request)
         {
-            if (_access.IsClient)
+            if (!_access.IsAdmin && !_access.IsManager)
                 return Forbid();
+
             var vessel = await ApplyVesselWriteAccessFilter(_db.Vessels)
     .FirstOrDefaultAsync(x => x.Id == id);
 
@@ -196,8 +209,9 @@ namespace Survey_Certification_App.Controllers
         [HttpPost("{id:int}/deactivate")]
         public async Task<IActionResult> Deactivate(int id)
         {
-            if (_access.IsClient)
+            if (!_access.IsAdmin && !_access.IsManager)
                 return Forbid();
+
             var vessel = await ApplyVesselWriteAccessFilter(_db.Vessels)
     .FirstOrDefaultAsync(x => x.Id == id);
 
@@ -219,7 +233,7 @@ namespace Survey_Certification_App.Controllers
             return Deactivate(id);
         }
 
-        private static VesselDto ToDto(Vessel vessel)
+        private VesselDto ToDto(Vessel vessel)
         {
             return new VesselDto
             {
@@ -248,8 +262,22 @@ namespace Survey_Certification_App.Controllers
                 DraughtMoulded = vessel.DraughtMoulded,
                 ProjectId = vessel.ProjectId,
                 ProjectName = vessel.ProjectName,
-                Status = vessel.Status.ToString()
+                Status = vessel.Status.ToString(),
+                CreatedByUserId = vessel.CreatedByUserId,
+                CreatedAt = vessel.CreatedAt,
+                UpdatedAt = vessel.UpdatedAt,
+                CanEdit = CanEditVessel(vessel)
             };
+        }
+
+        private bool CanEditVessel(Vessel vessel)
+        {
+            if (_access.IsAdmin)
+                return true;
+
+            return _access.IsManager &&
+                   _access.UserId.HasValue &&
+                   vessel.CreatedByUserId == _access.UserId.Value;
         }
     }
     
@@ -285,5 +313,9 @@ namespace Survey_Certification_App.Controllers
     {
         public int Id { get; set; }
         public string Status { get; set; } = string.Empty;
+        public int? CreatedByUserId { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? UpdatedAt { get; set; }
+        public bool CanEdit { get; set; }
     }
 }

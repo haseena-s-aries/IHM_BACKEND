@@ -15,6 +15,7 @@ namespace Survey_Certification_App.Controllers
     [ApiController]
     public class SurveyController : ControllerBase
     {
+        private const string VscpChecklistFileType = "VscpChecklistTemplate";
         private readonly ApplicationDbContext _db;
         private readonly IEmailService _emailService;
         private readonly ILogger<SurveyController> _logger;
@@ -67,6 +68,7 @@ namespace Survey_Certification_App.Controllers
 
             var jobs = await _db.SurveyJobs
                 .Include(x => x.Assignments)
+                .Include(x => x.UploadedFiles)
                 .Where(x =>
                     x.AssignedUserId == currentUserId ||
                     x.Assignments.Any(a =>
@@ -112,7 +114,7 @@ namespace Survey_Certification_App.Controllers
                             : $"User {u.Id}")
                 );
 
-            return Ok(ToDto(job, userNames));
+            return Ok(await ToDtoAsync(job, userNames));
         }
 
         [HttpPost("jobs")]
@@ -132,9 +134,7 @@ namespace Survey_Certification_App.Controllers
             if (!currentUserId.HasValue)
                 return Unauthorized("Login is required to create a survey job.");
 
-            var createdBy = request.CreatedByUserId ?? currentUserId.Value;
-            if (!IsCurrentUserAdmin() && createdBy != currentUserId.Value)
-                return Forbid();
+            var createdBy = currentUserId.Value;
 
             if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
             {
@@ -227,7 +227,7 @@ namespace Survey_Certification_App.Controllers
             _db.SurveyJobs.Add(job);
             await _db.SaveChangesAsync();
 
-            return CreatedAtAction(nameof(GetJobById), new { id = job.Id }, ToDto(job));
+            return CreatedAtAction(nameof(GetJobById), new { id = job.Id }, await ToDtoAsync(job));
         }
 
 
@@ -239,7 +239,7 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
-            if (!await CanAccessJobAsync(id))
+            if (!await CanEditJobAsync(job))
                 return Forbid();
 
             if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
@@ -248,20 +248,53 @@ namespace Survey_Certification_App.Controllers
                     return BadRequest("Selected manager must be active, approved, and have Manager access for this project.");
             }
 
-            job.ClientName = request.ClientName;
-            job.ProjectName = request.ProjectName;
-            job.VesselName = request.VesselName;
-            job.ImoNumber = request.ImoNumber;
+            Vessel? vessel = null;
+            if (request.VesselId.HasValue && request.VesselId.Value > 0)
+            {
+                vessel = await _db.Vessels.FirstOrDefaultAsync(x => x.Id == request.VesselId.Value);
+                if (vessel == null)
+                    return BadRequest("Selected vessel not found.");
+            }
+
+            job.ClientName = vessel?.ClientName ?? request.ClientName;
+            if (IsCurrentUserAdmin() && !string.IsNullOrWhiteSpace(request.ProjectName))
+                job.ProjectName = request.ProjectName;
+            job.VesselId = vessel?.Id ?? request.VesselId;
+            job.VesselName = vessel?.VesselName ?? request.VesselName;
+            job.ImoNumber = vessel?.ImoNumber ?? request.ImoNumber;
+            job.VesselSnapshotJson = vessel == null ? job.VesselSnapshotJson : System.Text.Json.JsonSerializer.Serialize(new
+            {
+                vessel.Id,
+                vessel.VesselName,
+                vessel.ImoNumber,
+                vessel.OfficialNumber,
+                vessel.VesselType,
+                vessel.Flag,
+                vessel.PortOfRegistry,
+                vessel.ClassSociety,
+                vessel.GrossTonnage,
+                vessel.NetTonnage,
+                vessel.Deadweight,
+                vessel.LengthOverall,
+                vessel.Breadth,
+                vessel.Depth,
+                vessel.YearBuilt,
+                vessel.OwnerName,
+                vessel.ManagerName,
+                vessel.ClientName
+            });
             job.SiteName = request.SiteName;
             job.StartDate = request.StartDate;
-
+            job.SurveyDate = request.SurveyDate;
             job.EndDate = request.EndDate;
+            job.AuditPort = request.AuditPort;
+            job.AuditAddress = request.AuditAddress;
             job.AssignedManagerId = request.AssignedManagerId;
             job.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
 
-            return Ok(ToDto(job));
+            return Ok(await ToDtoAsync(job));
         }
 
         [HttpPost("jobs/{id:int}/assign")]
@@ -274,7 +307,7 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
-            if (!await CanAccessJobAsync(id))
+            if (!await CanEditJobAsync(job))
                 return Forbid();
 
             if (request.SurveyorUserId <= 0)
@@ -320,7 +353,7 @@ namespace Survey_Certification_App.Controllers
             await _db.SaveChangesAsync();
             await SendAssignmentChangeEmailsAsync(emailRecipients, job, assignedByName);
 
-            return Ok(ToDto(job));
+            return Ok(await ToDtoAsync(job));
         }
         [HttpPost("jobs/{id:int}/survey-date")]
         public async Task<IActionResult> UpdateSurveyDate(int id, [FromBody] UpdateSurveyDateRequest request)
@@ -330,7 +363,7 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
-            if (!await CanAccessJobAsync(id))
+            if (!await CanEditJobAsync(job))
                 return Forbid();
 
             if (request.SurveyDate == null)
@@ -342,7 +375,7 @@ namespace Survey_Certification_App.Controllers
 
             await _db.SaveChangesAsync();
 
-            return Ok(ToDto(job));
+            return Ok(await ToDtoAsync(job));
         }
         [HttpPost("jobs/{id:int}/status")]
         public async Task<IActionResult> UpdateStatus(int id, [FromBody] UpdateSurveyJobStatusRequest request)
@@ -352,7 +385,7 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
-            if (!await CanAccessJobAsync(id))
+            if (!await CanEditJobAsync(job))
                 return Forbid();
 
             job.Status = request.Status;
@@ -366,7 +399,7 @@ namespace Survey_Certification_App.Controllers
 
             await _db.SaveChangesAsync();
 
-            return Ok(ToDto(job));
+            return Ok(await ToDtoAsync(job));
         }
 
         [HttpPost("jobs/{id:int}/photos")]
@@ -476,7 +509,7 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
-            if (!await CanAccessJobAsync(id))
+            if (!await CanEditJobAsync(job))
                 return Forbid();
 
             await using var transaction = await _db.Database.BeginTransactionAsync();
@@ -563,6 +596,7 @@ namespace Survey_Certification_App.Controllers
         {
             var query = _db.SurveyJobs
                 .Include(x => x.Assignments)
+                .Include(x => x.UploadedFiles)
                 .AsQueryable();
 
             query = ApplyJobAccessFilter(query);
@@ -832,7 +866,7 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
-            if (!await CanAccessJobAsync(id))
+            if (!await CanEditJobAsync(job))
                 return Forbid();
 
             if (request.PrimarySurveyorUserId.HasValue &&
@@ -882,7 +916,7 @@ namespace Survey_Certification_App.Controllers
             await _db.SaveChangesAsync();
             await SendAssignmentChangeEmailsAsync(emailRecipients, job, assignedByName);
 
-            return Ok(ToDto(job));
+            return Ok(await ToDtoAsync(job));
         }
 
         [HttpPost("jobs/{id:int}/assigned-manager")]
@@ -897,7 +931,7 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
-            if (!await CanAccessJobAsync(id))
+            if (!await CanEditJobAsync(job))
                 return Forbid();
 
             if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
@@ -910,7 +944,7 @@ namespace Survey_Certification_App.Controllers
             job.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
-            return Ok(ToDto(job));
+            return Ok(await ToDtoAsync(job));
         }
 
         public class AssignSurveyorsRequest
@@ -1019,6 +1053,27 @@ namespace Survey_Certification_App.Controllers
         {
             return await ApplyJobAccessFilter(_db.SurveyJobs.AsQueryable())
                 .AnyAsync(x => x.Id == jobId);
+        }
+
+        private Task<bool> CanEditJobAsync(SurveyJob job)
+        {
+            if (_access.IsAdmin)
+                return Task.FromResult(true);
+
+            if (!_access.IsManager || !_access.UserId.HasValue)
+                return Task.FromResult(false);
+
+            return Task.FromResult(job.CreatedByUserId == _access.UserId.Value);
+        }
+
+        private bool CanEditJob(SurveyJob job)
+        {
+            if (_access.IsAdmin)
+                return true;
+
+            return _access.IsManager &&
+                   _access.UserId.HasValue &&
+                   job.CreatedByUserId == _access.UserId.Value;
         }
 
         private async Task<bool> IsValidAssignedManagerAsync(int managerId, SurveyModuleType moduleType)
@@ -1255,13 +1310,129 @@ namespace Survey_Certification_App.Controllers
             : (!string.IsNullOrWhiteSpace(u.Email) ? u.Email : $"User {u.Id}")
     );
 
-            return jobs.Select(job => ToDto(job, userNames)).ToList();
+            var progressByJobId = await GetIhmProgressByJobIdAsync(jobs);
+
+            return jobs
+                .Select(job => ToDto(job, userNames, GetProgressForJob(job, progressByJobId), CanEditJob(job)))
+                .ToList();
+        }
+
+        private async Task<SurveyJobDto> ToDtoAsync(
+            SurveyJob job,
+            IReadOnlyDictionary<int, string>? userNames = null)
+        {
+            var progressByJobId = await GetIhmProgressByJobIdAsync(new[] { job });
+            return ToDto(job, userNames, GetProgressForJob(job, progressByJobId), CanEditJob(job));
+        }
+
+        private async Task<Dictionary<int, IhmSurveyProgress>> GetIhmProgressByJobIdAsync(
+            IEnumerable<SurveyJob> jobs)
+        {
+            var ihmJobIds = jobs
+                .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey)
+                .Select(x => x.Id)
+                .Distinct()
+                .ToList();
+
+            if (ihmJobIds.Count == 0)
+                return new Dictionary<int, IhmSurveyProgress>();
+
+            var totalByJobId = await _db.IhmCheckpoints
+                .Where(x => ihmJobIds.Contains(x.SurveyJobId))
+                .GroupBy(x => x.SurveyJobId)
+                .Select(x => new
+                {
+                    JobId = x.Key,
+                    TotalItems = x.Count()
+                })
+                .ToDictionaryAsync(x => x.JobId, x => x.TotalItems);
+
+            var completedFromCheckpoints = await _db.IhmCheckpoints
+                .Where(x =>
+                    ihmJobIds.Contains(x.SurveyJobId) &&
+                    x.Result != IhmCheckpointResult.Pending)
+                .Select(x => new
+                {
+                    JobId = x.SurveyJobId,
+                    CheckpointId = x.Id
+                })
+                .ToListAsync();
+
+            var completedFromSubmissions = await _db.IhmCheckpointSubmissions
+                .Where(x =>
+                    ihmJobIds.Contains(x.SurveyJobId) &&
+                    (x.Status == IhmCheckpointSubmissionStatus.Submitted ||
+                     x.Status == IhmCheckpointSubmissionStatus.Approved))
+                .Select(x => new
+                {
+                    JobId = x.SurveyJobId,
+                    CheckpointId = x.IhmCheckpointId
+                })
+                .Distinct()
+                .ToListAsync();
+
+            var completedByJobId = completedFromCheckpoints
+                .Concat(completedFromSubmissions)
+                .GroupBy(x => x.JobId)
+                .ToDictionary(
+                    x => x.Key,
+                    x => x.Select(item => item.CheckpointId).Distinct().Count());
+
+            return ihmJobIds.ToDictionary(
+                jobId => jobId,
+                jobId =>
+                {
+                    var totalItems = totalByJobId.TryGetValue(jobId, out var total)
+                        ? total
+                        : 0;
+                    var completedItems = completedByJobId.TryGetValue(jobId, out var completed)
+                        ? Math.Min(completed, totalItems)
+                        : 0;
+                    return new IhmSurveyProgress(totalItems, completedItems);
+                });
+        }
+
+        private static IhmSurveyProgress GetProgressForJob(
+            SurveyJob job,
+            IReadOnlyDictionary<int, IhmSurveyProgress> progressByJobId)
+        {
+            return job.ModuleType == SurveyModuleType.IhmSurvey &&
+                   progressByJobId.TryGetValue(job.Id, out var progress)
+                ? progress
+                : IhmSurveyProgress.Empty;
+        }
+
+        private static LegacyVscpChecklist? FindLatestLegacyVscpChecklist(int jobId)
+        {
+            var uploadRoot = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "wwwroot",
+                "uploads",
+                "ihm-excel");
+
+            if (!Directory.Exists(uploadRoot))
+                return null;
+
+            var latestFile = Directory.EnumerateFiles(uploadRoot, $"{jobId}_*.xlsx")
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .FirstOrDefault();
+
+            return latestFile == null
+                ? null
+                : new LegacyVscpChecklist(
+                    $"/uploads/ihm-excel/{latestFile.Name}",
+                    latestFile.Name,
+                    latestFile.LastWriteTimeUtc);
         }
 
         private static SurveyJobDto ToDto(
             SurveyJob job,
-            IReadOnlyDictionary<int, string>? userNames = null)
+            IReadOnlyDictionary<int, string>? userNames = null,
+            IhmSurveyProgress? progress = null,
+            bool canEdit = false)
         {
+            progress ??= IhmSurveyProgress.Empty;
             var assignments = job.Assignments
                 .OrderByDescending(x => x.AssignedAt)
                 .Select(x => new SurveyAssignmentDto
@@ -1286,6 +1457,13 @@ namespace Survey_Certification_App.Controllers
                 .Where(x => x.Status != "Returned")
                 .OrderBy(x => x.AssignedAt)
                 .ToList();
+            var vscpChecklist = job.UploadedFiles
+                .Where(x => string.Equals(x.FileType, VscpChecklistFileType, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => x.UploadedAt)
+                .FirstOrDefault();
+            var legacyVscpChecklist = vscpChecklist == null
+                ? FindLatestLegacyVscpChecklist(job.Id)
+                : null;
 
             return new SurveyJobDto
             {
@@ -1304,7 +1482,14 @@ namespace Survey_Certification_App.Controllers
                 SurveyDate = job.SurveyDate,
                 EndDate = job.EndDate,
                 Status = job.Status.ToString(),
+                DisplayStatus = CalculateDisplayStatus(job, progress.Value),
+                CompletedItems = progress.Value.CompletedItems,
+                TotalItems = progress.Value.TotalItems,
+                CompletionPercentage = progress.Value.TotalItems == 0
+                    ? 0
+                    : Math.Round((decimal)progress.Value.CompletedItems * 100 / progress.Value.TotalItems, 2),
                 CreatedByUserId = job.CreatedByUserId,
+                CanEdit = canEdit,
                 AssignedUserId = job.AssignedUserId,
                 AssignedManagerId = job.AssignedManagerId,
                 AssignedManagerName = job.AssignedManagerId.HasValue &&
@@ -1316,6 +1501,9 @@ namespace Survey_Certification_App.Controllers
                 UpdatedAt = job.UpdatedAt,
                 AuditPort = job.AuditPort,
                 AuditAddress = job.AuditAddress,
+                VscpChecklistFilePath = vscpChecklist?.FilePath ?? legacyVscpChecklist?.FilePath,
+                VscpChecklistFileName = vscpChecklist?.OriginalFileName ?? legacyVscpChecklist?.FileName,
+                VscpChecklistUploadedAt = vscpChecklist?.UploadedAt ?? legacyVscpChecklist?.UploadedAt,
 
                 AssignedSurveyorIds = assignments
                     .Select(x => x.SurveyorUserId)
@@ -1328,6 +1516,33 @@ namespace Survey_Certification_App.Controllers
                 SecondarySurveyorUserId = activeAssignments.ElementAtOrDefault(1)?.SurveyorUserId,
                 Assignments = assignments
             };
+        }
+
+        private sealed record LegacyVscpChecklist(
+            string FilePath,
+            string FileName,
+            DateTime UploadedAt);
+
+        private static string CalculateDisplayStatus(
+            SurveyJob job,
+            IhmSurveyProgress progress)
+        {
+            if (progress.TotalItems > 0 && progress.CompletedItems >= progress.TotalItems)
+                return "Completed";
+
+            if (progress.CompletedItems > 0)
+                return "Pending";
+
+            return job.SurveyDate.HasValue
+                ? "In Progress"
+                : "Not Started";
+        }
+
+        private readonly record struct IhmSurveyProgress(
+            int TotalItems,
+            int CompletedItems)
+        {
+            public static readonly IhmSurveyProgress Empty = new(0, 0);
         }
 
         private sealed record SurveyorAssignmentTarget(
@@ -1372,6 +1587,7 @@ namespace Survey_Certification_App.Controllers
             public string? ClientName { get; set; }
 
             public string? ProjectName { get; set; }
+            public int? VesselId { get; set; }
 
             public string? VesselName { get; set; }
 
@@ -1385,6 +1601,7 @@ namespace Survey_Certification_App.Controllers
 
 
             public DateTime? StartDate { get; set; }
+            public DateTime? SurveyDate { get; set; }
 
             public DateTime? EndDate { get; set; }
         }
@@ -1436,8 +1653,13 @@ namespace Survey_Certification_App.Controllers
             public DateTime? EndDate { get; set; }
 
             public string Status { get; set; } = string.Empty;
+            public string DisplayStatus { get; set; } = "Not Started";
+            public int CompletedItems { get; set; }
+            public int TotalItems { get; set; }
+            public decimal CompletionPercentage { get; set; }
 
             public int CreatedByUserId { get; set; }
+            public bool CanEdit { get; set; }
             public int? AssignedUserId { get; set; }
             public int? AssignedManagerId { get; set; }
             public string? AssignedManagerName { get; set; }
@@ -1445,6 +1667,9 @@ namespace Survey_Certification_App.Controllers
             public DateTime CreatedAt { get; set; }
 
             public DateTime? UpdatedAt { get; set; }
+            public string? VscpChecklistFilePath { get; set; }
+            public string? VscpChecklistFileName { get; set; }
+            public DateTime? VscpChecklistUploadedAt { get; set; }
 
             public List<int> AssignedSurveyorIds { get; set; } = new();
 
