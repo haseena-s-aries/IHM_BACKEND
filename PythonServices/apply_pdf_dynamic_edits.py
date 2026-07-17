@@ -7,6 +7,13 @@ from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from pypdf._page import PageObject
+from pypdf.generic import (
+    ArrayObject,
+    DictionaryObject,
+    FloatObject,
+    NameObject,
+    NumberObject,
+)
 from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
@@ -21,7 +28,9 @@ from report_pdf.helpers import (
     register_fonts,
     replace_template_footer,
     FONT_ARIAL,
+    FONT_TIMES,
     txt,
+    wrap_text_to_lines,
 )
 
 
@@ -107,6 +116,13 @@ SECTION_ROWS = [
         "APPENDIX 7 - QUALIFICATION AND CAPABILITY CERTIFICATE",
     ),
 ]
+
+CONTENTS_LEFT_X = 70
+CONTENTS_RIGHT_X = 520
+CONTENTS_TITLE_Y = 755
+CONTENTS_START_Y = 720
+CONTENTS_BOTTOM_Y = 60
+CONTENTS_FONT_SIZE = 12
 
 
 def make_style(edit):
@@ -830,6 +846,122 @@ def rebuild_contents(pages, data):
         + pages_without_contents[contents_index:]
     )
 
+def _content_row_bottom_y(y, number, title, page_no):
+    number = txt(number)
+    title = txt(title).upper()
+    page_text = txt(page_no)
+    page_x = CONTENTS_RIGHT_X - pdfmetrics.stringWidth(
+        page_text,
+        FONT_TIMES,
+        CONTENTS_FONT_SIZE,
+    )
+    title_x = CONTENTS_LEFT_X + 20 if number else CONTENTS_LEFT_X
+    max_title_width = page_x - title_x - 18
+    title_lines = wrap_text_to_lines(
+        title,
+        FONT_TIMES,
+        CONTENTS_FONT_SIZE,
+        max_title_width,
+    )
+
+    return y - (max(len(title_lines), 1) * 16) - 8
+
+
+def collect_contents_links(pages, data):
+    page_texts = extract_normalized_page_texts(pages)
+    contents_index = next(
+        (
+            index
+            for index, text in enumerate(page_texts)
+            if "CONTENTS" in text
+        ),
+        None,
+    )
+
+    if contents_index is None:
+        return []
+
+    rows = build_sequential_contents_rows(pages, data, page_texts)
+    links = []
+    contents_page_index = contents_index
+    y = CONTENTS_START_Y
+
+    for row in rows:
+        if y <= CONTENTS_BOTTOM_Y:
+            contents_page_index += 1
+            y = CONTENTS_TITLE_Y
+
+        next_y = _content_row_bottom_y(
+            y,
+            row.get("number"),
+            row.get("title"),
+            row.get("pageNo"),
+        )
+
+        target_page = row.get("pageNo")
+        if isinstance(target_page, int) and 0 <= target_page < len(pages):
+            links.append({
+                "contentsPage": contents_page_index,
+                "targetPage": target_page,
+                "rect": [
+                    CONTENTS_LEFT_X,
+                    max(next_y + 4, 0),
+                    CONTENTS_RIGHT_X,
+                    y + 14,
+                ],
+            })
+
+        y = next_y
+
+    return links
+
+
+def add_contents_links(writer, links):
+    for link in links:
+        contents_page = int(link["contentsPage"])
+        target_page = int(link["targetPage"])
+
+        if (
+            contents_page < 0
+            or target_page < 0
+            or contents_page >= len(writer.pages)
+            or target_page >= len(writer.pages)
+        ):
+            continue
+
+        rect = ArrayObject([
+            FloatObject(value)
+            for value in link["rect"]
+        ])
+
+        target_ref = writer.pages[target_page].indirect_reference
+        annotation = DictionaryObject()
+        annotation.update({
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Link"),
+            NameObject("/Rect"): rect,
+            NameObject("/Border"): ArrayObject([
+                NumberObject(0),
+                NumberObject(0),
+                NumberObject(0),
+            ]),
+            NameObject("/A"): DictionaryObject({
+                NameObject("/S"): NameObject("/GoTo"),
+                NameObject("/D"): ArrayObject([
+                    target_ref,
+                    NameObject("/Fit"),
+                ]),
+            }),
+        })
+
+        page = writer.pages[contents_page]
+        annotation_ref = writer._add_object(annotation)
+
+        if "/Annots" in page:
+            page["/Annots"].append(annotation_ref)
+        else:
+            page[NameObject("/Annots")] = ArrayObject([annotation_ref])
+
 def main():
     if len(sys.argv) < 5:
         raise SystemExit(
@@ -936,10 +1068,14 @@ def main():
             visible_page_number
         )
 
+    contents_links = collect_contents_links(renumbered, data)
+
     writer = PdfWriter()
 
     for page in renumbered:
         writer.add_page(page)
+
+    add_contents_links(writer, contents_links)
 
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
