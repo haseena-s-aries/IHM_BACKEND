@@ -1,5 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.IemailserviceInterface;
@@ -135,6 +135,10 @@ namespace Survey_Certification_App.Controllers
                 return Unauthorized("Login is required to create a survey job.");
 
             var createdBy = currentUserId.Value;
+            if (_access.IsManager && (!request.AssignedManagerId.HasValue || request.AssignedManagerId.Value <= 0))
+            {
+                request.AssignedManagerId = createdBy;
+            }
 
             if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
             {
@@ -730,9 +734,9 @@ namespace Survey_Certification_App.Controllers
                     .CountAsync();
             }
 
-            var total = await activeJobs.CountAsync();
-            var exSurvey = await activeJobs.CountAsync(x => x.ModuleType == SurveyModuleType.ExSurvey);
-            var ihmSurvey = await activeJobs.CountAsync(x => x.ModuleType == SurveyModuleType.IhmSurvey);
+            var total = await scopedJobs.CountAsync();
+            var exSurvey = await scopedJobs.CountAsync(x => x.ModuleType == SurveyModuleType.ExSurvey);
+            var ihmSurvey = await scopedJobs.CountAsync(x => x.ModuleType == SurveyModuleType.IhmSurvey);
             var submitted = await activeJobs.CountAsync(x => x.Status == SurveyJobStatus.Submitted);
             var approved = await activeJobs.CountAsync(x => x.Status == SurveyJobStatus.Approved);
 

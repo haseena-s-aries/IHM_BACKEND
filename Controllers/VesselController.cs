@@ -74,12 +74,11 @@ namespace Survey_Certification_App.Controllers
             var vessels = await ApplyVesselReadAccessFilter(_db.Vessels)
                 .Where(x => x.Status == VesselStatus.Active)
                 .OrderBy(x => x.VesselName)
-                .Select(x => ToDto(x))
                 .ToListAsync();
 
-            return Ok(vessels);
-        }
+            return Ok(vessels.Select(ToDto));
 
+        }
         [HttpGet("{id:int}")]
         public async Task<IActionResult> GetById(int id)
         {
@@ -280,7 +279,7 @@ namespace Survey_Certification_App.Controllers
                    vessel.CreatedByUserId == _access.UserId.Value;
         }
     }
-    
+
     public class SaveVesselRequest
     {
         public int? ProjectId { get; set; }
