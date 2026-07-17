@@ -121,9 +121,15 @@ namespace Survey_Certification_App.Controllers
         [HttpPost]
         public async Task<IActionResult> AssignReport([FromBody] AssignReportRequest request)
         {
+            if (request == null)
+                return BadRequest(new { message = "Assignment request is required." });
+
             var normalizedType = AccessScopeService.NormalizeReportType(request.ReportType);
             if (normalizedType is not ("ihm" or "exsurvey"))
                 return BadRequest(new { message = "Only IHM and EX-Survey report assignment is currently supported." });
+
+            if (request.ReportId <= 0 || request.ClientUserId <= 0)
+                return BadRequest(new { message = "Report and Client are required." });
 
             if (!_access.UserId.HasValue)
                 return Unauthorized();

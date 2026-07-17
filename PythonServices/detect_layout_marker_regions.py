@@ -8,7 +8,9 @@ import re
 def normalize_label(value):
     text = str(value or "").upper().strip()
     text = text.replace(" ", "").replace("_", "").replace("-", "")
-    text = text.replace("O", "0")
+    # Only normalize OCR mistakes after S/V prefix. Do not change every O in normal words.
+    if len(text) >= 2 and text[0] in ("S", "V"):
+        text = text[0] + text[1:].replace("O", "0").replace("I", "1").replace("L", "1")
     return text
 
 def detect_regions(image_path):
@@ -73,9 +75,9 @@ def detect_regions(image_path):
             x, y, w, h = cv2.boundingRect(contour)
 
             # Keep small blue label rectangles, ignore long connector lines.
-            if w < 25 or h < 12:
+            if w < 18 or h < 8:
                 continue
-            if w > 300 or h > 100:
+            if w > 360 or h > 130:
                 continue
 
             aspect = w / max(h, 1)
@@ -86,7 +88,7 @@ def detect_regions(image_path):
             debug_log(f"BOX_ACCEPTED x={x}, y={y}, w={w}, h={h}, aspect={aspect}")
         for x, y, w, h in boxes:
             # Crop inside the blue box border, not the connector line.
-            pad = 10
+            pad = 16
             crop = img[
                 max(0, y - pad):min(original_h, y + h + pad),
                 max(0, x - pad):min(original_w, x + w + pad)
@@ -106,7 +108,7 @@ def detect_regions(image_path):
                 cv2.THRESH_BINARY + cv2.THRESH_OTSU
             )[1]
 
-            psm_groups = [[7, 8], [6, 11, 13]]
+            psm_groups = [[7, 8, 13], [6, 11]]
             found = False
 
             for psm_group in psm_groups:
@@ -125,7 +127,7 @@ def detect_regions(image_path):
 
                     label = normalize_label(raw)
                     debug_log(f"BOX x={x}, y={y}, w={w}, h={h}, PSM={psm}, RAW={raw.strip()}, LABEL={label}")
-                    matches = re.findall(r"[SV]\d{1,2}", label)
+                    matches = re.findall(r"(?<![A-Z0-9])[SV]\d{1,3}(?![A-Z0-9])", label)
                     if not matches:
                         continue
 
@@ -155,6 +157,81 @@ def detect_regions(image_path):
                         }
                     found = True
                     break
+                # Fallback OCR over the full layout. This catches marker labels missed by
+        # the blue-box contour pass because of thin borders, broken boxes, or tight crops.
+        try:
+            full_big = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            full_gray = cv2.cvtColor(full_big, cv2.COLOR_BGR2GRAY)
+            full_gray = cv2.GaussianBlur(full_gray, (3, 3), 0)
+            full_gray = cv2.threshold(
+                full_gray,
+                0,
+                255,
+                cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )[1]
+
+            ocr_data = pytesseract.image_to_data(
+                full_gray,
+                config=(
+                    "--psm 11 --oem 3 "
+                    "-c tessedit_char_whitelist=SVsv0123456789OILoil "
+                ),
+                output_type=pytesseract.Output.DICT,
+                timeout=8
+            )
+
+            for i, raw in enumerate(ocr_data.get("text", [])):
+                label = normalize_label(raw)
+                matches = re.findall(r"[SV]\d{1,3}", label)
+                if not matches:
+                    continue
+
+                try:
+                    confidence = float(ocr_data["conf"][i])
+                except Exception:
+                    confidence = 0
+
+                if confidence < 25:
+                    continue
+
+                x = int(ocr_data["left"][i] / 3)
+                y = int(ocr_data["top"][i] / 3)
+                w = int(ocr_data["width"][i] / 3)
+                h = int(ocr_data["height"][i] / 3)
+
+                if w < 6 or h < 6:
+                    continue
+
+                for m in matches:
+                    text = normalize_label(m)
+                    prefix = text[0]
+                    digits = re.sub(r"\D", "", text[1:])
+                    if not digits:
+                        continue
+
+                    number = int(digits)
+                    if number <= 0:
+                        continue
+
+                    text = f"{prefix}{number:02d}"
+
+                    if text in detected:
+                        continue
+
+                    detected[text] = {
+                        "xPercent": (x + w / 2) / original_w,
+                        "yPercent": (y + h / 2) / original_h,
+                        "widthPercent": max(w, 20) / original_w,
+                        "heightPercent": max(h, 12) / original_h,
+                        "confidence": max(confidence / 100, 0.55),
+                        "source": "full_image_ocr_fallback",
+                        "text": text
+                    }
+
+                    debug_log(f"FALLBACK_DETECTED text={text}, conf={confidence}, x={x}, y={y}, w={w}, h={h}")
+
+        except Exception as fallback_ex:
+            debug_log(f"FULL_IMAGE_OCR_FALLBACK_ERROR: {fallback_ex}")
         debug_log(f"BOXES_FOUND={len(boxes)}")
         debug_log(f"DETECTED={list(detected.keys())}")
         debug_log("========== OCR END ==========")

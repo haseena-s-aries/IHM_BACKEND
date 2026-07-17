@@ -718,11 +718,14 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     draw = ImageDraw.Draw(canvas_img)
 
     try:
-        font = ImageFont.truetype("arial.ttf", 16)
+        font = ImageFont.truetype("arialbd.ttf", 18)
     except OSError:
-        font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("arial.ttf", 18)
+        except OSError:
+            font = ImageFont.load_default()
 
-    blue = (0, 0, 255)
+    blue = (0, 45, 210)
     white = (255, 255, 255)
 
     placements = []
@@ -755,7 +758,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         if is_existing_label:
             max_label_w = 210
             lines = wrap_pil_text(draw, label, font, max_label_w - 14)
-            line_h = 18
+            line_h = 21
 
             label_w = max(
                 90,
@@ -930,7 +933,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         y = item["y"]
         line_end = item["line_end"]
 
-        draw.line([x, y, line_end[0], line_end[1]], fill=blue, width=2)
+        draw.line([x, y, line_end[0], line_end[1]], fill=blue, width=3)
 
         dot_radius = 4
         draw.ellipse(
@@ -942,11 +945,11 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
 
     for item in placements:
         x1, y1, x2, y2 = item["box"]
-        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=2)
+        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=3)
 
         text_y = y1 + 6
         for line in item["lines"]:
-            draw.text((x1 + 7, text_y), line, fill=blue, font=font)
+            draw.text((x1 + 8, text_y), line, fill=blue, font=font)
             text_y += 18
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

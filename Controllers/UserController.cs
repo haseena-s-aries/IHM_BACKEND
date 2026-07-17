@@ -935,8 +935,35 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("managers")]
         public async Task<IActionResult> GetManagers()
         {
-            var managers = await _db.users
-                .Where(u => u.IsApproved == true && u.Role == "Manager")
+            var ihmProjectId = await _access.ResolveProjectIdAsync("IHM");
+
+            var managersQuery = _db.users
+                .AsNoTracking()
+                .Where(u => u.IsApproved == true && !u.IsRejected);
+
+            if (ihmProjectId.HasValue)
+            {
+                var projectId = ihmProjectId.Value;
+                managersQuery = managersQuery.Where(u =>
+                    _db.UserProjectAccesses.Any(access =>
+                        access.UserId == u.Id &&
+                        access.ProjectId == projectId &&
+                        access.IsActive &&
+                        access.IsApproved &&
+                        !access.IsRejected &&
+                        access.RoleName.ToLower() == "manager") ||
+                    (u.ProjectId == projectId &&
+                     ((u.RoleName ?? "").ToLower() == "manager" ||
+                      (u.Role ?? "").ToLower() == "manager")));
+            }
+            else
+            {
+                managersQuery = managersQuery.Where(u =>
+                    ((u.RoleName ?? "").ToLower() == "manager" ||
+                     (u.Role ?? "").ToLower() == "manager"));
+            }
+
+            var managers = await managersQuery
                 .OrderBy(u => u.FullName)
                 .Select(u => new
                 {

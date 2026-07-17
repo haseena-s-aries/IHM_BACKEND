@@ -198,6 +198,79 @@ using (var scope = app.Services.CreateScope())
                 ON dbo.UserNotifications(UserId, IsRead, CreatedAt DESC);
         END
 
+        IF OBJECT_ID('dbo.ReportAssignments', 'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.ReportAssignments
+            (
+                Id INT IDENTITY(1,1) NOT NULL
+                    CONSTRAINT PK_ReportAssignments PRIMARY KEY,
+                ReportType NVARCHAR(40) NOT NULL,
+                ReportId INT NOT NULL,
+                SurveyJobId INT NULL,
+                ClientUserId INT NOT NULL,
+                AssignedByUserId INT NOT NULL,
+                AssignedAt DATETIME2 NOT NULL,
+                IsActive BIT NOT NULL,
+                RevokedAt DATETIME2 NULL,
+                RevokedByUserId INT NULL,
+                CONSTRAINT FK_ReportAssignments_users_AssignedByUserId
+                    FOREIGN KEY (AssignedByUserId) REFERENCES dbo.users(Id),
+                CONSTRAINT FK_ReportAssignments_users_ClientUserId
+                    FOREIGN KEY (ClientUserId) REFERENCES dbo.users(Id),
+                CONSTRAINT FK_ReportAssignments_users_RevokedByUserId
+                    FOREIGN KEY (RevokedByUserId) REFERENCES dbo.users(Id)
+            );
+        END
+
+        IF OBJECT_ID('dbo.ReportAssignments', 'U') IS NOT NULL
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_ReportAssignments_AssignedByUserId'
+                  AND object_id = OBJECT_ID('dbo.ReportAssignments'))
+            BEGIN
+                CREATE INDEX IX_ReportAssignments_AssignedByUserId
+                    ON dbo.ReportAssignments(AssignedByUserId);
+            END
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_ReportAssignments_ClientUserId'
+                  AND object_id = OBJECT_ID('dbo.ReportAssignments'))
+            BEGIN
+                CREATE INDEX IX_ReportAssignments_ClientUserId
+                    ON dbo.ReportAssignments(ClientUserId);
+            END
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_ReportAssignments_RevokedByUserId'
+                  AND object_id = OBJECT_ID('dbo.ReportAssignments'))
+            BEGIN
+                CREATE INDEX IX_ReportAssignments_RevokedByUserId
+                    ON dbo.ReportAssignments(RevokedByUserId);
+            END
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_ReportAssignments_ReportType_ReportId_ClientUserId_IsActive'
+                  AND object_id = OBJECT_ID('dbo.ReportAssignments'))
+            BEGIN
+                CREATE INDEX IX_ReportAssignments_ReportType_ReportId_ClientUserId_IsActive
+                    ON dbo.ReportAssignments(ReportType, ReportId, ClientUserId, IsActive);
+            END
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_ReportAssignments_ReportType_ReportId_ClientUserId'
+                  AND object_id = OBJECT_ID('dbo.ReportAssignments'))
+            BEGIN
+                CREATE UNIQUE INDEX IX_ReportAssignments_ReportType_ReportId_ClientUserId
+                    ON dbo.ReportAssignments(ReportType, ReportId, ClientUserId)
+                    WHERE IsActive = 1;
+            END
+        END
+
         IF OBJECT_ID('dbo.IhmImageMarkers', 'U') IS NOT NULL
         BEGIN
             IF COL_LENGTH('dbo.IhmImageMarkers', 'Source') IS NULL

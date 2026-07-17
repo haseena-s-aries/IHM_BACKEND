@@ -1,23 +1,20 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.Models.Survey;
+using Survey_Certification_App.Services;
+using Microsoft.EntityFrameworkCore;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Jpeg;
-using SixLabors.ImageSharp.Processing;
-using ImageSharpImage = SixLabors.ImageSharp.Image;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
-using Survey_Certification_App.Models;
-using Survey_Certification_App.Services;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Processing;
+using ImageSharpImage = SixLabors.ImageSharp.Image;
 
 namespace Survey_Certification_App.Controllers
 {
@@ -495,7 +492,13 @@ namespace Survey_Certification_App.Controllers
                 .Replace("_", "")
                 .Replace("-", "");
 
-            text = text.Replace("O", "0");
+            if (text.Length >= 2 && (text[0] == 'S' || text[0] == 'V'))
+            {
+                text = text[0] + text[1..]
+                    .Replace("O", "0")
+                    .Replace("I", "1")
+                    .Replace("L", "1");
+            }
 
             if (text.Length >= 2 && (text[0] == 'S' || text[0] == 'V'))
             {

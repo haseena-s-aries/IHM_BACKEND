@@ -138,12 +138,8 @@ namespace Survey_Certification_App.Controllers
 
             if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
             {
-                var managerExists = await _db.users.AnyAsync(x =>
-                    x.Id == request.AssignedManagerId.Value &&
-                    x.IsApproved == true &&
-                    x.Role == "Manager");
-                if (!managerExists)
-                    return BadRequest("Selected manager not found or not approved.");
+                if (!await IsValidAssignedManagerAsync(request.AssignedManagerId.Value, request.ModuleType))
+                    return BadRequest("Selected manager must be active, approved, and have Manager access for this project.");
             }
 
 
@@ -248,12 +244,8 @@ namespace Survey_Certification_App.Controllers
 
             if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
             {
-                var managerExists = await _db.users.AnyAsync(x =>
-                    x.Id == request.AssignedManagerId.Value &&
-                    x.IsApproved == true &&
-                    x.Role == "Manager");
-                if (!managerExists)
-                    return BadRequest("Selected manager not found or not approved.");
+                if (!await IsValidAssignedManagerAsync(request.AssignedManagerId.Value, job.ModuleType))
+                    return BadRequest("Selected manager must be active, approved, and have Manager access for this project.");
             }
 
             job.ClientName = request.ClientName;
@@ -285,47 +277,48 @@ namespace Survey_Certification_App.Controllers
             if (!await CanAccessJobAsync(id))
                 return Forbid();
 
-            var alreadyAssigned = job.Assignments.Any(x =>
-  x.SurveyorUserId == request.SurveyorUserId &&
-  x.Status != SurveyAssignmentStatus.Returned);
+            if (request.SurveyorUserId <= 0)
+                return BadRequest("Surveyor user id is required.");
 
-            if (alreadyAssigned)
-                return BadRequest("This surveyor is already assigned to this job.");
-
-            var surveyor = await _db.users.FindAsync(request.SurveyorUserId);
-            if (surveyor == null)
+            var surveyorExists = await _db.users.AnyAsync(x => x.Id == request.SurveyorUserId);
+            if (!surveyorExists)
                 return BadRequest("Selected surveyor not found.");
 
             var assignedBy = request.AssignedByUserId ?? GetCurrentUserId() ?? 0;
             var assignedByName = await GetUserDisplayNameAsync(assignedBy);
+            var activeAssignments = GetActiveAssignmentsInRoleOrder(job);
+            var targets = activeAssignments
+                .Select((assignment, index) =>
+                    new SurveyorAssignmentTarget(
+                        assignment.SurveyorUserId,
+                        RoleForAssignmentIndex(index)))
+                .ToList();
 
-            var assignment = new SurveyAssignment
+            if (!targets.Any(x => x.SurveyorUserId == request.SurveyorUserId))
             {
-                SurveyJobId = job.Id,
-                SurveyorUserId = request.SurveyorUserId,
-                AssignedByUserId = assignedBy,
-                AssignedAt = DateTime.UtcNow,
-                Status = SurveyAssignmentStatus.Assigned
-            };
+                targets.Add(new SurveyorAssignmentTarget(
+                    request.SurveyorUserId,
+                    RoleForAssignmentIndex(targets.Count)));
+            }
 
-            job.Assignments.Add(assignment);
-            job.AssignedUserId = request.SurveyorUserId;
-            job.Status = SurveyJobStatus.Assigned;
-            job.UpdatedAt = DateTime.UtcNow;
-            _db.UserNotifications.Add(CreateAssignmentNotification(
-                surveyor.Id,
+            var surveyorIds = targets
+                .Select(x => x.SurveyorUserId)
+                .Distinct()
+                .ToList();
+            var surveyors = await _db.users
+                .Where(x => surveyorIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id);
+
+            var emailRecipients = ApplySurveyorAssignmentChanges(
                 job,
-                "Surveyor",
-                assignedByName,
-                isReassignment: false));
+                targets,
+                surveyors,
+                assignedBy,
+                assignedByName);
+            job.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
-            await TrySendAssignmentEmailAsync(
-                surveyor,
-                job,
-                "Surveyor",
-                assignedByName,
-                isReassignment: false);
+            await SendAssignmentChangeEmailsAsync(emailRecipients, job, assignedByName);
 
             return Ok(ToDto(job));
         }
@@ -849,27 +842,25 @@ namespace Survey_Certification_App.Controllers
                 return BadRequest("Primary and secondary surveyor cannot be same.");
             }
 
-            var activeAssignments = job.Assignments
-                .Where(x => x.Status != SurveyAssignmentStatus.Returned)
-                .ToList();
-            var isReassignment = activeAssignments.Count > 0;
-            foreach (var oldAssignment in activeAssignments)
-            {
-                oldAssignment.Status = SurveyAssignmentStatus.Returned;
-            }
-
             var assignedBy = request.AssignedByUserId ?? GetCurrentUserId() ?? 0;
             var assignedByName = await GetUserDisplayNameAsync(assignedBy);
 
-            var surveyorIds = new[]
+            var targets = new[]
             {
-        request.PrimarySurveyorUserId,
-        request.SecondarySurveyorUserId
-    }
-            .Where(x => x.HasValue && x.Value > 0)
-            .Select(x => x!.Value)
-            .Distinct()
-            .ToList();
+                request.PrimarySurveyorUserId,
+                request.SecondarySurveyorUserId
+            }
+                .Select((idValue, index) => new { idValue, index })
+                .Where(x => x.idValue.HasValue && x.idValue.Value > 0)
+                .Select(x => new SurveyorAssignmentTarget(
+                    x.idValue!.Value,
+                    RoleForAssignmentIndex(x.index)))
+                .ToList();
+
+            var surveyorIds = targets
+                .Select(x => x.SurveyorUserId)
+                .Distinct()
+                .ToList();
 
             var surveyors = await _db.users
                 .Where(x => surveyorIds.Contains(x.Id))
@@ -880,48 +871,16 @@ namespace Survey_Certification_App.Controllers
             if (missingSurveyorIds.Count > 0)
                 return BadRequest($"Surveyor not found: {string.Join(", ", missingSurveyorIds)}");
 
-            var assignedAt = DateTime.UtcNow;
-            var emailRecipients = new List<(User User, string Role)>();
-            for (var index = 0; index < surveyorIds.Count; index++)
-            {
-                var role = index == 0 ? "Primary Surveyor" : "Secondary Surveyor";
-                job.Assignments.Add(new SurveyAssignment
-                {
-                    SurveyJobId = job.Id,
-                    SurveyorUserId = surveyorIds[index],
-                    AssignedByUserId = assignedBy,
-                    // Keep the requested primary/secondary order deterministic.
-                    AssignedAt = assignedAt.AddTicks(index),
-                    Status = SurveyAssignmentStatus.Assigned
-                });
-                _db.UserNotifications.Add(CreateAssignmentNotification(
-                    surveyorIds[index],
-                    job,
-                    role,
-                    assignedByName,
-                    isReassignment));
-                emailRecipients.Add((surveyors[surveyorIds[index]], role));
-            }
-
-            job.Status = surveyorIds.Any()
-                ? SurveyJobStatus.Assigned
-                : SurveyJobStatus.Draft;
-            job.AssignedUserId = surveyorIds.FirstOrDefault() > 0
-                ? surveyorIds.First()
-                : null;
-
+            var emailRecipients = ApplySurveyorAssignmentChanges(
+                job,
+                targets,
+                surveyors,
+                assignedBy,
+                assignedByName);
             job.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
-            foreach (var recipient in emailRecipients)
-            {
-                await TrySendAssignmentEmailAsync(
-                    recipient.User,
-                    job,
-                    recipient.Role,
-                    assignedByName,
-                    isReassignment);
-            }
+            await SendAssignmentChangeEmailsAsync(emailRecipients, job, assignedByName);
 
             return Ok(ToDto(job));
         }
@@ -943,12 +902,8 @@ namespace Survey_Certification_App.Controllers
 
             if (request.AssignedManagerId.HasValue && request.AssignedManagerId.Value > 0)
             {
-                var managerExists = await _db.users.AnyAsync(x =>
-                    x.Id == request.AssignedManagerId.Value &&
-                    x.IsApproved == true &&
-                    x.Role == "Manager");
-                if (!managerExists)
-                    return BadRequest("Selected manager not found or not approved.");
+                if (!await IsValidAssignedManagerAsync(request.AssignedManagerId.Value, job.ModuleType))
+                    return BadRequest("Selected manager must be active, approved, and have Manager access for this project.");
             }
 
             job.AssignedManagerId = request.AssignedManagerId;
@@ -1066,6 +1021,23 @@ namespace Survey_Certification_App.Controllers
                 .AnyAsync(x => x.Id == jobId);
         }
 
+        private async Task<bool> IsValidAssignedManagerAsync(int managerId, SurveyModuleType moduleType)
+        {
+            var userIsApproved = await _db.users.AsNoTracking().AnyAsync(x =>
+                x.Id == managerId &&
+                x.IsApproved &&
+                !x.IsRejected);
+
+            if (!userIsApproved)
+                return false;
+
+            var projectName = moduleType == SurveyModuleType.IhmSurvey
+                ? "IHM"
+                : "EX Survey";
+
+            return await _access.HasProjectRoleAsync(managerId, projectName, "Manager");
+        }
+
         private async Task<string> GetUserDisplayNameAsync(int userId)
         {
             if (userId <= 0)
@@ -1075,6 +1047,110 @@ namespace Survey_Certification_App.Controllers
                 .Where(x => x.Id == userId)
                 .Select(x => x.FullName)
                 .FirstOrDefaultAsync() ?? $"User {userId}";
+        }
+
+        private static List<SurveyAssignment> GetActiveAssignmentsInRoleOrder(SurveyJob job)
+        {
+            return job.Assignments
+                .Where(x => x.Status != SurveyAssignmentStatus.Returned)
+                .OrderBy(x => x.AssignedAt)
+                .ThenBy(x => x.Id)
+                .ToList();
+        }
+
+        private static string RoleForAssignmentIndex(int index)
+        {
+            return index switch
+            {
+                0 => "Primary Surveyor",
+                1 => "Secondary Surveyor",
+                _ => "Additional Surveyor"
+            };
+        }
+
+        private List<SurveyorAssignmentEmailRecipient> ApplySurveyorAssignmentChanges(
+            SurveyJob job,
+            IReadOnlyList<SurveyorAssignmentTarget> targets,
+            IReadOnlyDictionary<int, User> surveyors,
+            int assignedBy,
+            string assignedByName)
+        {
+            var activeAssignments = GetActiveAssignmentsInRoleOrder(job);
+            var retainedAssignments = new HashSet<SurveyAssignment>();
+            var emailRecipients = new List<SurveyorAssignmentEmailRecipient>();
+            var assignedAt = DateTime.UtcNow;
+
+            for (var index = 0; index < targets.Count; index++)
+            {
+                var target = targets[index];
+                var currentAssignment = activeAssignments.ElementAtOrDefault(index);
+
+                if (currentAssignment?.SurveyorUserId == target.SurveyorUserId)
+                {
+                    retainedAssignments.Add(currentAssignment);
+                    continue;
+                }
+
+                var isReassignment = currentAssignment != null;
+                var newAssignment = new SurveyAssignment
+                {
+                    SurveyJobId = job.Id,
+                    SurveyorUserId = target.SurveyorUserId,
+                    AssignedByUserId = assignedBy,
+                    AssignedAt = assignedAt.AddTicks(index),
+                    Status = SurveyAssignmentStatus.Assigned
+                };
+
+                job.Assignments.Add(newAssignment);
+
+                _db.UserNotifications.Add(CreateAssignmentNotification(
+                    target.SurveyorUserId,
+                    job,
+                    target.Role,
+                    assignedByName,
+                    isReassignment));
+
+                if (surveyors.TryGetValue(target.SurveyorUserId, out var surveyor))
+                {
+                    emailRecipients.Add(new SurveyorAssignmentEmailRecipient(
+                        surveyor,
+                        target.Role,
+                        isReassignment));
+                }
+            }
+
+            foreach (var activeAssignment in activeAssignments)
+            {
+                if (!retainedAssignments.Contains(activeAssignment))
+                {
+                    activeAssignment.Status = SurveyAssignmentStatus.Returned;
+                }
+            }
+
+            job.Status = targets.Count > 0
+                ? SurveyJobStatus.Assigned
+                : SurveyJobStatus.Draft;
+            job.AssignedUserId = targets.Count > 0
+                ? targets[0].SurveyorUserId
+                : null;
+
+            return emailRecipients;
+        }
+
+        private async Task SendAssignmentChangeEmailsAsync(
+            IEnumerable<SurveyorAssignmentEmailRecipient> recipients,
+            SurveyJob job,
+            string assignedByName)
+        {
+            foreach (var recipient in recipients)
+            {
+                await TrySendAssignmentEmailAsync(
+                    recipient.User,
+                    job,
+                    recipient.Role,
+                    assignedByName,
+                    recipient.IsReassignment);
+            }
         }
 
         private static UserNotification CreateAssignmentNotification(
@@ -1253,6 +1329,15 @@ namespace Survey_Certification_App.Controllers
                 Assignments = assignments
             };
         }
+
+        private sealed record SurveyorAssignmentTarget(
+            int SurveyorUserId,
+            string Role);
+
+        private sealed record SurveyorAssignmentEmailRecipient(
+            User User,
+            string Role,
+            bool IsReassignment);
 
         public class CreateSurveyJobRequest
         {

@@ -19,7 +19,12 @@ namespace Survey_Certification_App.Controllers
             _db = db;
             _access = access;
         }
-        private IQueryable<Vessel> ApplyVesselAccessFilter(IQueryable<Vessel> query)
+        private IQueryable<Vessel> ApplyVesselReadAccessFilter(IQueryable<Vessel> query)
+        {
+            return query;
+        }
+
+        private IQueryable<Vessel> ApplyVesselWriteAccessFilter(IQueryable<Vessel> query)
         {
             if (_access.IsAdmin)
                 return query;
@@ -56,7 +61,7 @@ namespace Survey_Certification_App.Controllers
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            var vessels = await ApplyVesselAccessFilter(_db.Vessels)
+            var vessels = await ApplyVesselReadAccessFilter(_db.Vessels)
                 .Where(x => x.Status == VesselStatus.Active)
                 .OrderBy(x => x.VesselName)
                 .Select(x => ToDto(x))
@@ -68,7 +73,7 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("{id:int}")]
         public async Task<IActionResult> GetById(int id)
         {
-            var vessel = await ApplyVesselAccessFilter(_db.Vessels)
+            var vessel = await ApplyVesselReadAccessFilter(_db.Vessels)
      .FirstOrDefaultAsync(x => x.Id == id);
 
             if (vessel == null)
@@ -153,7 +158,7 @@ namespace Survey_Certification_App.Controllers
         {
             if (_access.IsClient)
                 return Forbid();
-            var vessel = await ApplyVesselAccessFilter(_db.Vessels)
+            var vessel = await ApplyVesselWriteAccessFilter(_db.Vessels)
     .FirstOrDefaultAsync(x => x.Id == id);
 
             if (vessel == null)
@@ -193,7 +198,7 @@ namespace Survey_Certification_App.Controllers
         {
             if (_access.IsClient)
                 return Forbid();
-            var vessel = await ApplyVesselAccessFilter(_db.Vessels)
+            var vessel = await ApplyVesselWriteAccessFilter(_db.Vessels)
     .FirstOrDefaultAsync(x => x.Id == id);
 
             if (vessel == null)
