@@ -148,6 +148,145 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
     await db.Database.ExecuteSqlRawAsync("""
+        IF OBJECT_ID('dbo.SurveyJobs', 'U') IS NOT NULL
+        BEGIN
+            IF COL_LENGTH('dbo.SurveyJobs', 'VesselId') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD VesselId INT NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'VesselSnapshotJson') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD VesselSnapshotJson NVARCHAR(MAX) NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'ProjectId') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD ProjectId INT NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'SurveyDate') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD SurveyDate DATETIME2 NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'AssignedUserId') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD AssignedUserId INT NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'AssignedManagerId') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD AssignedManagerId INT NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'UpdatedAt') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD UpdatedAt DATETIME2 NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'AuditPort') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD AuditPort NVARCHAR(MAX) NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'AuditAddress') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD AuditAddress NVARCHAR(MAX) NULL;
+
+            IF COL_LENGTH('dbo.SurveyJobs', 'CreatedByUserId') IS NULL
+                ALTER TABLE dbo.SurveyJobs ADD CreatedByUserId INT NOT NULL
+                    CONSTRAINT DF_SurveyJobs_CreatedByUserId DEFAULT (0) WITH VALUES;
+        END
+
+        IF OBJECT_ID('dbo.SurveyAssignments', 'U') IS NULL
+            AND OBJECT_ID('dbo.SurveyJobs', 'U') IS NOT NULL
+        BEGIN
+            CREATE TABLE dbo.SurveyAssignments
+            (
+                Id INT IDENTITY(1,1) NOT NULL
+                    CONSTRAINT PK_SurveyAssignments PRIMARY KEY,
+                SurveyJobId INT NOT NULL,
+                SurveyorUserId INT NOT NULL,
+                AssignedByUserId INT NOT NULL,
+                AssignedAt DATETIME2 NOT NULL
+                    CONSTRAINT DF_SurveyAssignments_AssignedAt DEFAULT SYSUTCDATETIME(),
+                Status NVARCHAR(MAX) NOT NULL
+                    CONSTRAINT DF_SurveyAssignments_Status DEFAULT N'Assigned',
+                CONSTRAINT FK_SurveyAssignments_SurveyJobs_SurveyJobId
+                    FOREIGN KEY (SurveyJobId) REFERENCES dbo.SurveyJobs(Id) ON DELETE CASCADE
+            );
+            CREATE INDEX IX_SurveyAssignments_SurveyJobId
+                ON dbo.SurveyAssignments(SurveyJobId);
+            CREATE INDEX IX_SurveyAssignments_SurveyorUserId
+                ON dbo.SurveyAssignments(SurveyorUserId);
+        END
+
+        IF OBJECT_ID('dbo.SurveyAssignments', 'U') IS NOT NULL
+        BEGIN
+            IF COL_LENGTH('dbo.SurveyAssignments', 'SurveyJobId') IS NULL
+                ALTER TABLE dbo.SurveyAssignments ADD SurveyJobId INT NOT NULL
+                    CONSTRAINT DF_SurveyAssignments_SurveyJobId DEFAULT (0) WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyAssignments', 'SurveyorUserId') IS NULL
+                ALTER TABLE dbo.SurveyAssignments ADD SurveyorUserId INT NOT NULL
+                    CONSTRAINT DF_SurveyAssignments_SurveyorUserId DEFAULT (0) WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyAssignments', 'AssignedByUserId') IS NULL
+                ALTER TABLE dbo.SurveyAssignments ADD AssignedByUserId INT NOT NULL
+                    CONSTRAINT DF_SurveyAssignments_AssignedByUserId DEFAULT (0) WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyAssignments', 'AssignedAt') IS NULL
+                ALTER TABLE dbo.SurveyAssignments ADD AssignedAt DATETIME2 NOT NULL
+                    CONSTRAINT DF_SurveyAssignments_AssignedAt DEFAULT SYSUTCDATETIME() WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyAssignments', 'Status') IS NULL
+                ALTER TABLE dbo.SurveyAssignments ADD Status NVARCHAR(MAX) NOT NULL
+                    CONSTRAINT DF_SurveyAssignments_Status DEFAULT N'Assigned' WITH VALUES;
+        END
+
+        IF OBJECT_ID('dbo.SurveyUploadedFiles', 'U') IS NULL
+            AND OBJECT_ID('dbo.SurveyJobs', 'U') IS NOT NULL
+        BEGIN
+            CREATE TABLE dbo.SurveyUploadedFiles
+            (
+                Id INT IDENTITY(1,1) NOT NULL
+                    CONSTRAINT PK_SurveyUploadedFiles PRIMARY KEY,
+                SurveyJobId INT NOT NULL,
+                OriginalFileName NVARCHAR(255) NOT NULL,
+                StoredFileName NVARCHAR(255) NOT NULL,
+                FilePath NVARCHAR(500) NOT NULL,
+                FileType NVARCHAR(100) NULL,
+                ContentType NVARCHAR(100) NULL,
+                SizeBytes BIGINT NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_SizeBytes DEFAULT (0),
+                UploadedByUserId INT NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_UploadedByUserId DEFAULT (0),
+                UploadedAt DATETIME2 NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_UploadedAt DEFAULT SYSUTCDATETIME(),
+                CONSTRAINT FK_SurveyUploadedFiles_SurveyJobs_SurveyJobId
+                    FOREIGN KEY (SurveyJobId) REFERENCES dbo.SurveyJobs(Id) ON DELETE CASCADE
+            );
+            CREATE INDEX IX_SurveyUploadedFiles_SurveyJobId
+                ON dbo.SurveyUploadedFiles(SurveyJobId);
+        END
+
+        IF OBJECT_ID('dbo.SurveyUploadedFiles', 'U') IS NOT NULL
+        BEGIN
+            IF COL_LENGTH('dbo.SurveyUploadedFiles', 'OriginalFileName') IS NULL
+                ALTER TABLE dbo.SurveyUploadedFiles ADD OriginalFileName NVARCHAR(255) NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_OriginalFileName DEFAULT N'' WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyUploadedFiles', 'StoredFileName') IS NULL
+                ALTER TABLE dbo.SurveyUploadedFiles ADD StoredFileName NVARCHAR(255) NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_StoredFileName DEFAULT N'' WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyUploadedFiles', 'FilePath') IS NULL
+                ALTER TABLE dbo.SurveyUploadedFiles ADD FilePath NVARCHAR(500) NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_FilePath DEFAULT N'' WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyUploadedFiles', 'FileType') IS NULL
+                ALTER TABLE dbo.SurveyUploadedFiles ADD FileType NVARCHAR(100) NULL;
+
+            IF COL_LENGTH('dbo.SurveyUploadedFiles', 'ContentType') IS NULL
+                ALTER TABLE dbo.SurveyUploadedFiles ADD ContentType NVARCHAR(100) NULL;
+
+            IF COL_LENGTH('dbo.SurveyUploadedFiles', 'SizeBytes') IS NULL
+                ALTER TABLE dbo.SurveyUploadedFiles ADD SizeBytes BIGINT NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_SizeBytes DEFAULT (0) WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyUploadedFiles', 'UploadedByUserId') IS NULL
+                ALTER TABLE dbo.SurveyUploadedFiles ADD UploadedByUserId INT NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_UploadedByUserId DEFAULT (0) WITH VALUES;
+
+            IF COL_LENGTH('dbo.SurveyUploadedFiles', 'UploadedAt') IS NULL
+                ALTER TABLE dbo.SurveyUploadedFiles ADD UploadedAt DATETIME2 NOT NULL
+                    CONSTRAINT DF_SurveyUploadedFiles_UploadedAt DEFAULT SYSUTCDATETIME() WITH VALUES;
+        END
+
         IF OBJECT_ID('dbo.IhmCheckpointSubmissions', 'U') IS NULL
         BEGIN
             CREATE TABLE dbo.IhmCheckpointSubmissions

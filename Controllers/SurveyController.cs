@@ -1310,7 +1310,16 @@ namespace Survey_Certification_App.Controllers
             : (!string.IsNullOrWhiteSpace(u.Email) ? u.Email : $"User {u.Id}")
     );
 
-            var progressByJobId = await GetIhmProgressByJobIdAsync(jobs);
+            Dictionary<int, IhmSurveyProgress> progressByJobId;
+            try
+            {
+                progressByJobId = await GetIhmProgressByJobIdAsync(jobs);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Unable to calculate IHM survey progress for job list. Returning jobs without progress.");
+                progressByJobId = new Dictionary<int, IhmSurveyProgress>();
+            }
 
             return jobs
                 .Select(job => ToDto(job, userNames, GetProgressForJob(job, progressByJobId), CanEditJob(job)))
@@ -1321,7 +1330,16 @@ namespace Survey_Certification_App.Controllers
             SurveyJob job,
             IReadOnlyDictionary<int, string>? userNames = null)
         {
-            var progressByJobId = await GetIhmProgressByJobIdAsync(new[] { job });
+            Dictionary<int, IhmSurveyProgress> progressByJobId;
+            try
+            {
+                progressByJobId = await GetIhmProgressByJobIdAsync(new[] { job });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Unable to calculate IHM survey progress for job {JobId}. Returning job without progress.", job.Id);
+                progressByJobId = new Dictionary<int, IhmSurveyProgress>();
+            }
             return ToDto(job, userNames, GetProgressForJob(job, progressByJobId), CanEditJob(job));
         }
 
