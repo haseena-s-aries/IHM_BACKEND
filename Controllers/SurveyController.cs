@@ -367,7 +367,7 @@ namespace Survey_Certification_App.Controllers
             if (job == null)
                 return NotFound("Survey job not found.");
 
-            if (!await CanEditJobAsync(job))
+            if (!await CanUpdateSurveyDateAsync(job))
                 return Forbid();
 
             if (request.SurveyDate == null)
@@ -1058,7 +1058,26 @@ namespace Survey_Certification_App.Controllers
             return await ApplyJobAccessFilter(_db.SurveyJobs.AsQueryable())
                 .AnyAsync(x => x.Id == jobId);
         }
+        private async Task<bool> CanUpdateSurveyDateAsync(SurveyJob job)
+        {
+            if (!_access.UserId.HasValue)
+                return false;
 
+            if (!string.Equals(GetCurrentUserRole(), "Surveyor", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var userId = _access.UserId.Value;
+
+            if (job.AssignedUserId == userId)
+                return true;
+
+            return await _db.SurveyAssignments
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.SurveyJobId == job.Id &&
+                    x.SurveyorUserId == userId &&
+                    x.Status != SurveyAssignmentStatus.Returned);
+        }
         private Task<bool> CanEditJobAsync(SurveyJob job)
         {
             if (_access.IsAdmin)
