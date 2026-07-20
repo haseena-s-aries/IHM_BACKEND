@@ -713,6 +713,18 @@ namespace Survey_Certification_App.Controllers
                 }
 
                 await using var transaction = await _db.Database.BeginTransactionAsync();
+                var oldHazardousYesSampleKeys = await _db.IhmCheckpoints
+                    .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
+                    .Select(x => x.Sample_No)
+                    .ToListAsync();
+
+                var oldHazardousYesSamples = oldHazardousYesSampleKeys
+                    .Select(NormalizeExcelKey)
+                    .Where(x => x.Length > 0)
+                    .ToHashSet();
+
+                var hasExistingHazardousMarkers = await _db.IhmImageMarkers
+                    .AnyAsync(x => x.SurveyJobId == jobId && x.IhmCheckpointId.HasValue);
 
                 var oldEquipmentRows = await _db.IhmEquipmentMachineryReportRows
                     .Where(x => x.SurveyJobId == jobId)
@@ -923,6 +935,23 @@ namespace Survey_Certification_App.Controllers
                 await _db.SaveChangesAsync();
 
                 await transaction.CommitAsync();
+                var newHazardousYesSampleKeys = await _db.IhmCheckpoints
+                    .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
+                    .Select(x => x.Sample_No)
+                    .ToListAsync();
+
+                var hasNewHazardousYesRows = newHazardousYesSampleKeys
+                    .Select(NormalizeExcelKey)
+                    .Where(x => x.Length > 0)
+                    .Any(x => !oldHazardousYesSamples.Contains(x));
+
+                if (hasExistingHazardousMarkers && hasNewHazardousYesRows)
+                {
+                    _markedImageQueue.Queue(
+                        jobId,
+                        IhmMarkedImageSectionType.Hazardous,
+                        force: true);
+                }
 
                 DeleteOldVscpChecklistFile(previousChecklistPath, relativeExcelPath);
 

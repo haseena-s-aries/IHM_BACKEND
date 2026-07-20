@@ -14,13 +14,7 @@ def normalize_label(value):
     return text
 
 def detect_regions(image_path):
-    img = cv2.imread(image_path)
-    if img is None:
-        return []
-
-    original_h, original_w = img.shape[:2]
-    detected = {}
-    DEBUG_FILE = r"E:\ARIES_PROJECTS\AurasApp_Apis\AurasApp_Apis\AurasApp_Apis\wwwroot\reports\ihm\ocr_debug.txt"
+    DEBUG_FILE = os.path.join(os.path.dirname(image_path), "ocr_debug.txt")
 
     def debug_log(message):
         try:
@@ -29,6 +23,24 @@ def detect_regions(image_path):
                 f.write(str(message) + "\n")
         except Exception:
             pass
+
+    debug_log("\n===================================")
+    debug_log(f"IMAGE_PATH={image_path}")
+    debug_log(f"IMAGE_EXISTS={os.path.exists(image_path)}")
+    debug_log(f"IMAGE_FILE_SIZE={os.path.getsize(image_path) if os.path.exists(image_path) else 0}")
+    debug_log(f"CWD={os.getcwd()}")
+    debug_log(f"PYTHON={sys.executable}")
+
+    img = cv2.imread(image_path)
+    debug_log(f"IMAGE_LOADED={img is not None}")
+
+    if img is None:
+        debug_log("STOP_REASON=cv2.imread returned None")
+        debug_log("========== OCR END ==========")
+        return []
+
+    original_h, original_w = img.shape[:2]
+    detected = {}
 
     debug_log("\n===================================")
     debug_log(f"IMAGE_PATH={image_path}")
