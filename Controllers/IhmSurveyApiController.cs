@@ -2550,10 +2550,9 @@ namespace Survey_Certification_App.Controllers
 
                     var basePdfPath = Path.Combine(outputFolder, "ihm-report-editor-base.pdf");
 
-                    if (!System.IO.File.Exists(basePdfPath))
-                    {
-                        System.IO.File.Copy(tempOutputPdfPath, basePdfPath, overwrite: false);
-                    }
+                    // Normal form-based PDF generation should always refresh the editor base.
+                    // Otherwise text-box edits will apply on the first generated old PDF.
+                    System.IO.File.Copy(tempOutputPdfPath, basePdfPath, overwrite: true);
 
                     System.IO.File.Move(tempOutputPdfPath, outputPdfPath);
 

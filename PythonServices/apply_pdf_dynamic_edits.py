@@ -198,8 +198,7 @@ def make_overlay(width, height, edit, flowable):
         c.rect(x, y, box_width, box_height, stroke=0, fill=1)
 
     _, rendered_height = flowable.wrap(box_width, box_height)
-    vertical_offset = max((box_height - rendered_height) / 2, 0)
-    flowable.drawOn(c, x, y + vertical_offset)
+    flowable.drawOn(c, x, y + box_height - rendered_height)
 
     c.save()
     packet.seek(0)
@@ -925,29 +924,63 @@ def collect_contents_links(pages, data):
 
 
 def add_contents_links(writer, links):
-    for link in links:
-        contents_page = int(link["contentsPage"])
-        target_page = int(link["targetPage"])
+    """
+    Add clickable internal navigation links to the final PDF writer.
 
-        if (
-            contents_page < 0
-            or target_page < 0
-            or contents_page >= len(writer.pages)
-            or target_page >= len(writer.pages)
+    Important:
+    Destination references are taken from the final PdfWriter rather than
+    reusing indirect references inherited from the source PDF.
+    """
+
+    total_pages = len(writer.pages)
+
+    for link in links:
+        try:
+            contents_page_index = int(link.get("contentsPage"))
+            target_page_index = int(link.get("targetPage"))
+            rect_values = link.get("rect") or []
+        except (TypeError, ValueError):
+            continue
+
+        # Validate source and destination page indexes.
+        if not (
+            0 <= contents_page_index < total_pages
+            and 0 <= target_page_index < total_pages
         ):
             continue
 
-        rect = ArrayObject([
-            FloatObject(value)
-            for value in link["rect"]
+        # A valid PDF link rectangle requires four coordinate values.
+        if len(rect_values) != 4:
+            continue
+
+        try:
+            link_rect = ArrayObject([
+                FloatObject(float(value))
+                for value in rect_values
+            ])
+        except (TypeError, ValueError):
+            continue
+
+        contents_page = writer.pages[contents_page_index]
+        target_page = writer.pages[target_page_index]
+
+        # Get a destination reference owned by the final PdfWriter.
+        # Do not directly reuse target_page.indirect_reference because it may
+        # still point to an object from the source PdfReader.
+        try:
+            target_reference = writer.get_reference(target_page)
+        except Exception:
+            target_reference = writer._add_object(target_page)
+
+        destination = ArrayObject([
+            target_reference,
+            NameObject("/Fit"),
         ])
 
-        target_ref = writer.pages[target_page].indirect_reference
-        annotation = DictionaryObject()
-        annotation.update({
+        annotation = DictionaryObject({
             NameObject("/Type"): NameObject("/Annot"),
             NameObject("/Subtype"): NameObject("/Link"),
-            NameObject("/Rect"): rect,
+            NameObject("/Rect"): link_rect,
             NameObject("/Border"): ArrayObject([
                 NumberObject(0),
                 NumberObject(0),
@@ -955,20 +988,30 @@ def add_contents_links(writer, links):
             ]),
             NameObject("/A"): DictionaryObject({
                 NameObject("/S"): NameObject("/GoTo"),
-                NameObject("/D"): ArrayObject([
-                    target_ref,
-                    NameObject("/Fit"),
-                ]),
+                NameObject("/D"): destination,
             }),
         })
 
-        page = writer.pages[contents_page]
-        annotation_ref = writer._add_object(annotation)
+        annotation_reference = writer._add_object(annotation)
 
-        if "/Annots" in page:
-            page["/Annots"].append(annotation_ref)
+        existing_annotations = contents_page.get("/Annots")
+
+        if existing_annotations is None:
+            contents_page[NameObject("/Annots")] = ArrayObject([
+                annotation_reference
+            ])
         else:
-            page[NameObject("/Annots")] = ArrayObject([annotation_ref])
+            # Resolve an indirect /Annots array when inherited from another PDF.
+            try:
+                annotations_array = existing_annotations.get_object()
+            except Exception:
+                annotations_array = existing_annotations
+
+            if not isinstance(annotations_array, ArrayObject):
+                annotations_array = ArrayObject()
+
+            annotations_array.append(annotation_reference)
+            contents_page[NameObject("/Annots")] = annotations_array
 
 def main():
     if len(sys.argv) < 5:
@@ -1072,9 +1115,9 @@ def main():
         # Cover is not included in displayed page count.
     if renumbered:
         renumbered[0] = update_cover_total(
-            renumbered[0],
-            visible_page_number
-        )
+        renumbered[0],
+        max(len(renumbered) - 1, 0)
+    )
 
     contents_links = collect_contents_links(renumbered, data)
 

@@ -218,7 +218,8 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
     image_height = image_top - image_y
     print(f"Appendix4 selected main map image={map_image} exists={image_exists}", file=sys.stderr)
     if not image_exists or map_image.stat().st_size <= 0:
-        raise FileNotFoundError(f"Appendix 4 generated image missing or empty: {map_image}")
+        print("Appendix 4 main map image missing. Skipping Appendix 4 layout pages.", file=sys.stderr)
+        return []
 
     if image_exists:
         image_started = time.perf_counter()
