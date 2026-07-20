@@ -21,7 +21,7 @@ namespace Survey_Certification_App.Controllers
         }
         private IQueryable<Vessel> ApplyVesselReadAccessFilter(IQueryable<Vessel> query)
         {
-            if (_access.IsAdmin)
+            if (_access.IsAdmin || _access.IsManager)
                 return query;
 
             if (_access.IsClient && _access.UserId.HasValue)
@@ -43,14 +43,6 @@ namespace Survey_Certification_App.Controllers
                                 a.SurveyorUserId == _access.UserId.Value &&
                                 a.Status != SurveyAssignmentStatus.Returned)
                         )));
-            }
-
-            if (_access.IsManager && _access.UserId.HasValue)
-            {
-                var managedProjectIds = _access.ManagedProjectIdQuery();
-                return query.Where(v =>
-                    (v.ProjectId.HasValue && managedProjectIds.Contains(v.ProjectId.Value)) ||
-                    v.CreatedByUserId == _access.UserId.Value);
             }
 
             return query.Where(v => false);
