@@ -4,7 +4,8 @@ import sys
 import re
 from io import BytesIO
 from pathlib import Path
-
+from pypdf.annotations import Link
+from pypdf.generic import Fit
 from pypdf import PdfReader, PdfWriter
 from pypdf._page import PageObject
 from pypdf.generic import (
@@ -647,11 +648,73 @@ def find_heading_from(
     return None
 
 
-def build_sequential_contents_rows(pages, data, page_texts=None):
+def build_sequential_contents_rows(
+    pages,
+    data,
+    page_texts=None,
+    search_start_index=None,
+):
+    """
+    Find the real section-heading pages sequentially.
+
+    search_start_index must point after the generated Contents pages and
+    Revision History page. Otherwise, section names printed inside the
+    Contents page itself will be mistaken for actual destination pages.
+    """
+
     if page_texts is None:
         page_texts = extract_normalized_page_texts(pages)
+
     rows = []
-    search_from = 1
+
+    if search_start_index is not None:
+        search_from = max(int(search_start_index), 0)
+    else:
+        contents_index = next(
+            (
+                index
+                for index, text in enumerate(page_texts)
+                if "CONTENTS" in text
+            ),
+            None,
+        )
+
+        if contents_index is None:
+            search_from = 1
+        else:
+            # Search for Revision History after the Contents page.
+            revision_index = find_heading_from(
+                page_texts,
+                "REVISION HISTORY",
+                contents_index + 1,
+            )
+
+            if revision_index is not None:
+                search_from = revision_index + 1
+            else:
+                # Fallback: skip every consecutive page that looks like
+                # a generated Contents page.
+                search_from = contents_index + 1
+
+                while search_from < len(page_texts):
+                    current_text = page_texts[search_from]
+
+                    contents_keyword_count = sum(
+                        1
+                        for _, title, _ in SECTION_ROWS
+                        if normalize_page_text(title) in current_text
+                    )
+
+                    # A contents continuation page normally contains several
+                    # section or appendix titles.
+                    if (
+                        "CONTENTS" in current_text
+                        or contents_keyword_count >= 3
+                    ):
+                        search_from += 1
+                        continue
+
+                    break
 
     definitions = list(SECTION_ROWS)
 
@@ -660,10 +723,15 @@ def build_sequential_contents_rows(pages, data, page_texts=None):
 
     for item in custom_appendices:
         appendix_no = item.get("appendixNo")
+
         if appendix_no is None:
             continue
 
-        appendix_no = int(appendix_no)
+        try:
+            appendix_no = int(appendix_no)
+        except (TypeError, ValueError):
+            continue
+
         title = (
             item.get("appendixTitle")
             or "ADDITIONAL DOCUMENTS"
@@ -673,7 +741,9 @@ def build_sequential_contents_rows(pages, data, page_texts=None):
 
     for appendix_no in sorted(custom_groups):
         title = custom_groups[appendix_no]
-        full_heading = f"APPENDIX {appendix_no} - {title}"
+        full_heading = (
+            f"APPENDIX {appendix_no} - {title}"
+        )
 
         definitions.append((
             "",
@@ -687,11 +757,12 @@ def build_sequential_contents_rows(pages, data, page_texts=None):
             keyword,
             search_from,
         )
-        # Full appendix heading may be split differently in extracted PDF text.
+
+        # Appendix text extraction may split or normalize the full heading.
         if found_index is None:
             appendix_match = re.search(
                 r"APPENDIX\s+(\d+)",
-                normalize_page_text(title)
+                normalize_page_text(title),
             )
 
             if appendix_match:
@@ -702,9 +773,10 @@ def build_sequential_contents_rows(pages, data, page_texts=None):
                     f"APPENDIX {appendix_number}",
                     search_from,
                 )
+
         if (
             found_index is None
-            and title == "RISK ASSESSMENT"
+            and normalize_page_text(title) == "RISK ASSESSMENT"
         ):
             found_index = find_heading_from(
                 page_texts,
@@ -722,11 +794,14 @@ def build_sequential_contents_rows(pages, data, page_texts=None):
             ),
         })
 
-        # Next heading search starts from previous heading page.
+        # Start the next search after the current heading page.
+        # Using +1 prevents two different rows from resolving to the
+        # same page because of overlapping heading text.
         if found_index is not None:
-            search_from = found_index
+            search_from = found_index + 1
 
     return rows
+
 def update_cover_total(page, total_pages):
     width = float(page.mediabox.width)
     height = float(page.mediabox.height)
@@ -785,16 +860,19 @@ def rebuild_contents(pages, data):
         return pages
 
     revision_index = find_heading_from(
-    page_texts,
-    "REVISION HISTORY",
-    contents_index + 1,
+        page_texts,
+        "REVISION HISTORY",
+        contents_index + 1,
     )
 
-    # Remove only old contents pages. Preserve revision history.
+    # Remove only the existing Contents pages.
+    # Preserve the Revision History page.
     contents_end_index = (
         revision_index
-        if revision_index is not None
-        and revision_index < introduction_index
+        if (
+            revision_index is not None
+            and revision_index < introduction_index
+        )
         else introduction_index
     )
 
@@ -803,10 +881,15 @@ def rebuild_contents(pages, data):
         + pages[contents_end_index:]
     )
 
+    page_texts_without_contents = (
+        page_texts[:contents_index]
+        + page_texts[contents_end_index:]
+    )
+
     contents_count = 1
     generated = []
 
-    for _ in range(3):
+    for _ in range(5):
         placeholders = [
             PageObject.create_blank_page(
                 width=float(pages[0].mediabox.width),
@@ -822,15 +905,21 @@ def rebuild_contents(pages, data):
         )
 
         shifted_page_texts = (
-            page_texts[:contents_index]
+            page_texts_without_contents[:contents_index]
             + [""] * contents_count
-            + page_texts[contents_end_index:]
+            + page_texts_without_contents[contents_index:]
+        )
+
+        # Actual headings begin only after the inserted Contents pages.
+        search_start_index = (
+            contents_index + contents_count
         )
 
         rows = build_sequential_contents_rows(
             shifted_pages,
             data,
-            shifted_page_texts,
+            page_texts=shifted_page_texts,
+            search_start_index=search_start_index,
         )
 
         generated = make_contents_pages(
@@ -852,7 +941,6 @@ def rebuild_contents(pages, data):
         + generated
         + pages_without_contents[contents_index:]
     )
-
 def _content_row_bottom_y(y, number, title, page_no):
     number = txt(number)
     title = txt(title).upper()
@@ -875,7 +963,19 @@ def _content_row_bottom_y(y, number, title, page_no):
 
 
 def collect_contents_links(pages, data):
+    """
+    Collect clickable Contents links using actual section pages.
+
+    The section search starts after the Contents and Revision History
+    pages so titles printed inside the Contents page are never selected
+    as destinations.
+    """
+
+    if not pages:
+        return []
+
     page_texts = extract_normalized_page_texts(pages)
+
     contents_index = next(
         (
             index
@@ -888,7 +988,43 @@ def collect_contents_links(pages, data):
     if contents_index is None:
         return []
 
-    rows = build_sequential_contents_rows(pages, data, page_texts)
+    revision_index = find_heading_from(
+        page_texts,
+        "REVISION HISTORY",
+        contents_index + 1,
+    )
+
+    if revision_index is not None:
+        search_start_index = revision_index + 1
+    else:
+        # Find the first page after all generated Contents pages.
+        search_start_index = contents_index + 1
+
+        while search_start_index < len(page_texts):
+            current_text = page_texts[search_start_index]
+
+            contents_keyword_count = sum(
+                1
+                for _, title, _ in SECTION_ROWS
+                if normalize_page_text(title) in current_text
+            )
+
+            if (
+                "CONTENTS" in current_text
+                or contents_keyword_count >= 3
+            ):
+                search_start_index += 1
+                continue
+
+            break
+
+    rows = build_sequential_contents_rows(
+        pages,
+        data,
+        page_texts=page_texts,
+        search_start_index=search_start_index,
+    )
+
     links = []
     contents_page_index = contents_index
     y = CONTENTS_START_Y
@@ -905,11 +1041,16 @@ def collect_contents_links(pages, data):
             row.get("pageNo"),
         )
 
-        target_page = row.get("pageNo")
-        if isinstance(target_page, int) and 0 <= target_page < len(pages):
+        target_page_index = row.get("pageNo")
+
+        if (
+            isinstance(target_page_index, int)
+            and 0 <= target_page_index < len(pages)
+            and target_page_index != contents_page_index
+        ):
             links.append({
                 "contentsPage": contents_page_index,
-                "targetPage": target_page,
+                "targetPage": target_page_index,
                 "rect": [
                     CONTENTS_LEFT_X,
                     max(next_y + 4, 0),
@@ -925,93 +1066,71 @@ def collect_contents_links(pages, data):
 
 def add_contents_links(writer, links):
     """
-    Add clickable internal navigation links to the final PDF writer.
+    Add internal clickable links to the contents pages.
 
-    Important:
-    Destination references are taken from the final PdfWriter rather than
-    reusing indirect references inherited from the source PDF.
+    Uses pypdf's native Link annotation so that destination page
+    references are resolved against the final PdfWriter page tree.
     """
 
     total_pages = len(writer.pages)
 
     for link in links:
         try:
-            contents_page_index = int(link.get("contentsPage"))
-            target_page_index = int(link.get("targetPage"))
+            contents_page_index = int(
+                link.get("contentsPage")
+            )
+            target_page_index = int(
+                link.get("targetPage")
+            )
             rect_values = link.get("rect") or []
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, AttributeError):
             continue
 
-        # Validate source and destination page indexes.
-        if not (
-            0 <= contents_page_index < total_pages
-            and 0 <= target_page_index < total_pages
-        ):
+        # Validate source page.
+        if not 0 <= contents_page_index < total_pages:
             continue
 
-        # A valid PDF link rectangle requires four coordinate values.
+        # Validate destination page.
+        if not 0 <= target_page_index < total_pages:
+            continue
+
+        # PDF link rectangle must contain:
+        # [left, bottom, right, top]
         if len(rect_values) != 4:
             continue
 
         try:
-            link_rect = ArrayObject([
-                FloatObject(float(value))
-                for value in rect_values
-            ])
+            left = float(rect_values[0])
+            bottom = float(rect_values[1])
+            right = float(rect_values[2])
+            top = float(rect_values[3])
         except (TypeError, ValueError):
             continue
 
-        contents_page = writer.pages[contents_page_index]
-        target_page = writer.pages[target_page_index]
+        # Reject invalid rectangles.
+        if right <= left or top <= bottom:
+            continue
 
-        # Get a destination reference owned by the final PdfWriter.
-        # Do not directly reuse target_page.indirect_reference because it may
-        # still point to an object from the source PdfReader.
-        try:
-            target_reference = writer.get_reference(target_page)
-        except Exception:
-            target_reference = writer._add_object(target_page)
+        link_annotation = Link(
+            rect=(
+                left,
+                bottom,
+                right,
+                top,
+            ),
+            target_page_index=target_page_index,
+            fit=Fit.fit(),
+            border=[
+                0,
+                0,
+                0,
+            ],
+        )
 
-        destination = ArrayObject([
-            target_reference,
-            NameObject("/Fit"),
-        ])
-
-        annotation = DictionaryObject({
-            NameObject("/Type"): NameObject("/Annot"),
-            NameObject("/Subtype"): NameObject("/Link"),
-            NameObject("/Rect"): link_rect,
-            NameObject("/Border"): ArrayObject([
-                NumberObject(0),
-                NumberObject(0),
-                NumberObject(0),
-            ]),
-            NameObject("/A"): DictionaryObject({
-                NameObject("/S"): NameObject("/GoTo"),
-                NameObject("/D"): destination,
-            }),
-        })
-
-        annotation_reference = writer._add_object(annotation)
-
-        existing_annotations = contents_page.get("/Annots")
-
-        if existing_annotations is None:
-            contents_page[NameObject("/Annots")] = ArrayObject([
-                annotation_reference
-            ])
-        else:
-            # Resolve an indirect /Annots array when inherited from another PDF.
-            try:
-                annotations_array = existing_annotations.get_object()
-            except Exception:
-                annotations_array = existing_annotations
-
-            if not isinstance(annotations_array, ArrayObject):
-                annotations_array = ArrayObject()
-
-            annotations_array.append(annotation_reference)
-            contents_page[NameObject("/Annots")] = annotations_array
+        writer.add_annotation(
+            page_number=contents_page_index,
+            annotation=link_annotation,
+        )
 
 def main():
     if len(sys.argv) < 5:
@@ -1058,7 +1177,7 @@ def main():
         ).append(edit)
 
     pages = []
-
+    structural_changed = bool(removed)
     for original_number, source_page in enumerate(
         original_pages,
         start=1
@@ -1085,7 +1204,11 @@ def main():
         pages.append(page)
         pages.extend(overflow_pages)
 
-    pages = rebuild_contents(pages, data)
+        if overflow_pages:
+            structural_changed = True
+
+    if structural_changed:
+        pages = rebuild_contents(pages, data)
 
     company_name = (
         data.get("reportInfo") or {}
@@ -1119,8 +1242,7 @@ def main():
         max(len(renumbered) - 1, 0)
     )
 
-    contents_links = collect_contents_links(renumbered, data)
-
+    contents_links = collect_contents_links(renumbered, data) if structural_changed else []
     writer = PdfWriter()
 
     for page in renumbered:
