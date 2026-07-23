@@ -137,19 +137,6 @@ namespace Survey_Certification_App.Services
                     ));
             }
 
-            if (IsSurveyor && ProjectId.HasValue && UserId.HasValue)
-            {
-                return query.Where(job =>
-                    job.ProjectId == ProjectId.Value &&
-                    (
-                        job.CreatedByUserId == UserId.Value ||
-                        job.AssignedUserId == UserId.Value ||
-                        job.Assignments.Any(a =>
-                            a.SurveyorUserId == UserId.Value &&
-                            a.Status != SurveyAssignmentStatus.Returned)
-                    ));
-            }
-
             if (IsManager && UserId.HasValue)
             {
                 var managedProjectIds = ManagedProjectIdQuery();

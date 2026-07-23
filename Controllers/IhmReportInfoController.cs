@@ -222,18 +222,20 @@ public class IhmReportInfoController : ControllerBase
         var query = _db.SurveyJobs
             .AsNoTracking()
             .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey)
-            .Join(
+            .GroupJoin(
                 _db.Vessels.AsNoTracking(),
                 job => job.VesselId,
                 vessel => vessel.Id,
-                (job, vessel) => new
+                (job, vessels) => new { job, vessels })
+            .SelectMany(
+                x => x.vessels.DefaultIfEmpty(),
+                (x, vessel) => new
                 {
-                    JobId = job.Id,
-                    job.JobNumber,
-                    vessel.VesselName,
-                    vessel.ImoNumber
-                }
-            );
+                    JobId = x.job.Id,
+                    x.job.JobNumber,
+                    VesselName = vessel != null ? vessel.VesselName : x.job.VesselName,
+                    ImoNumber = vessel != null ? vessel.ImoNumber : x.job.ImoNumber
+                });
 
         if (!string.IsNullOrWhiteSpace(search))
         {
@@ -511,6 +513,8 @@ public class IhmReportInfoController : ControllerBase
             job = new
             {
                 job.JobNumber,
+                job.VesselName,
+                job.ImoNumber,
                 job.ClientName,
                 job.AuditPort,
                 job.SiteName,

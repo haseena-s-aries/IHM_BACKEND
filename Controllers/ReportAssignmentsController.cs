@@ -284,13 +284,90 @@ namespace Survey_Certification_App.Controllers
                 .OrderByDescending(x => x.AssignedAt)
                 .ToListAsync();
 
-            var result = new List<AssignedReportDto>();
-            foreach (var assignment in assignments)
-            {
-                var report = await BuildAssignedReportDtoAsync(assignment);
-                if (report != null)
-                    result.Add(report);
-            }
+            var ihmJobIds = assignments
+                .Where(x => x.ReportType == "ihm")
+                .Select(x => x.SurveyJobId ?? x.ReportId)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+            var exJobIds = assignments
+                .Where(x => x.ReportType == "exsurvey")
+                .Select(x => x.SurveyJobId ?? x.ReportId)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            var jobs = await _db.SurveyJobs
+                .AsNoTracking()
+                .Where(x =>
+                    (x.ModuleType == SurveyModuleType.IhmSurvey && ihmJobIds.Contains(x.Id)) ||
+                    (x.ModuleType == SurveyModuleType.ExSurvey && exJobIds.Contains(x.Id)))
+                .Select(x => new
+                {
+                    x.Id,
+                    x.ModuleType,
+                    x.ProjectName,
+                    x.VesselName,
+                    x.SiteName,
+                    x.JobNumber,
+                    x.Status,
+                    x.CreatedByUserId
+                })
+                .ToListAsync();
+
+            var jobsById = jobs.ToDictionary(x => x.Id);
+            var createdByIds = jobs
+                .Select(x => x.CreatedByUserId)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+            var userNames = createdByIds.Count == 0
+                ? new Dictionary<int, string>()
+                : await _db.users
+                    .AsNoTracking()
+                    .Where(x => createdByIds.Contains(x.Id))
+                    .ToDictionaryAsync(
+                        x => x.Id,
+                        x => x.FullName ?? x.Email ?? $"User {x.Id}");
+
+            var result = assignments
+                .Select(assignment =>
+                {
+                    var jobId = assignment.SurveyJobId ?? assignment.ReportId;
+                    if (!jobsById.TryGetValue(jobId, out var job))
+                        return null;
+
+                    var isExSurvey = assignment.ReportType == "exsurvey";
+                    return new AssignedReportDto
+                    {
+                        AssignmentId = assignment.Id,
+                        ReportId = assignment.ReportId,
+                        SurveyJobId = job.Id,
+                        ReportType = assignment.ReportType,
+                        Title = string.IsNullOrWhiteSpace(job.ProjectName)
+                            ? isExSurvey ? "EX-Survey Report" : "IHM Survey Report"
+                            : job.ProjectName,
+                        VesselName = isExSurvey
+                            ? job.VesselName ?? job.SiteName
+                            : job.VesselName,
+                        Reference = job.JobNumber,
+                        Status = job.Status.ToString(),
+                        CreatedBy = userNames.TryGetValue(job.CreatedByUserId, out var createdBy)
+                            ? createdBy
+                            : job.CreatedByUserId > 0 ? $"User {job.CreatedByUserId}" : null,
+                        AssignedAt = assignment.AssignedAt,
+                        HasFile = true,
+                        ViewUrl = isExSurvey
+                            ? $"/api/ex-survey/jobs/{job.Id}/report"
+                            : $"/api/ihm-survey/jobs/{job.Id}/report-pdf",
+                        DownloadUrl = isExSurvey
+                            ? $"/api/ex-survey/jobs/{job.Id}/report"
+                            : $"/api/ihm-survey/jobs/{job.Id}/report-pdf"
+                    };
+                })
+                .Where(x => x != null)
+                .Cast<AssignedReportDto>()
+                .ToList();
 
             return Ok(result);
         }

@@ -209,6 +209,18 @@ namespace Survey_Certification_App.Controllers
             if (vessel == null)
                 return NotFound("Vessel not found.");
 
+            var linkedJobCount = await _db.SurveyJobs
+                .AsNoTracking()
+                .CountAsync(x => x.VesselId == id);
+
+            if (linkedJobCount > 0)
+            {
+                return Conflict(new
+                {
+                    message = $"This vessel cannot be deleted because it is linked to {linkedJobCount} survey job(s). Keep it active for report generation, or reassign those jobs to another vessel first."
+                });
+            }
+
             vessel.Status = VesselStatus.Inactive;
             vessel.UpdatedAt = DateTime.UtcNow;
 

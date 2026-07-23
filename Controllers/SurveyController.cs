@@ -6,6 +6,7 @@ using Survey_Certification_App.IemailserviceInterface;
 using Survey_Certification_App.Models;
 using Survey_Certification_App.Models.Survey;
 using Survey_Certification_App.Services;
+using System.Diagnostics;
 using System.Net;
 using System.Security.Claims;
 
@@ -542,6 +543,16 @@ namespace Survey_Certification_App.Controllers
                     await _db.IhmReportRevisions.Where(x => x.SurveyJobId == id).ToListAsync());
                 _db.IhmReportInfos.RemoveRange(
                     await _db.IhmReportInfos.Where(x => x.SurveyJobId == id).ToListAsync());
+                _db.PdfDynamicEdits.RemoveRange(
+                    await _db.PdfDynamicEdits.Where(x =>
+                        (x.ReportType == "ihm" || x.ReportType == "exsurvey") &&
+                        x.ReportId == id).ToListAsync());
+                _db.ReportAssignments.RemoveRange(
+                    await _db.ReportAssignments.Where(x =>
+                        x.SurveyJobId == id ||
+                        ((x.ReportType == "ihm" || x.ReportType == "exsurvey") && x.ReportId == id)).ToListAsync());
+                _db.IhmMarkedImageMetadata.RemoveRange(
+                    await _db.IhmMarkedImageMetadata.Where(x => x.SurveyJobId == id).ToListAsync());
 
                 _db.IhmAreaLayoutPlacements.RemoveRange(
                     await _db.IhmAreaLayoutPlacements.Where(x => x.SurveyJobId == id).ToListAsync());
@@ -598,7 +609,9 @@ namespace Survey_Certification_App.Controllers
          [FromQuery] string? ihmCompletionFilter,
          [FromQuery] string? jobCompletionFilter)
         {
+            var timer = Stopwatch.StartNew();
             var query = _db.SurveyJobs
+                .AsNoTracking()
                 .Include(x => x.Assignments)
                 .Include(x => x.UploadedFiles)
                 .AsQueryable();
@@ -643,7 +656,7 @@ namespace Survey_Certification_App.Controllers
                     .Distinct()
                     .ToListAsync();
 
-                var classifications = await BuildIhmAuditClassificationsAsync(candidateIds, logDetails: true);
+                var classifications = await BuildIhmAuditClassificationsAsync(candidateIds);
                 var matchingIds = classifications
                     .Where(x => string.Equals(ihmCompletionFilter, "completed", StringComparison.OrdinalIgnoreCase)
                         ? x.IsCompleted
@@ -669,7 +682,19 @@ namespace Survey_Certification_App.Controllers
                 .OrderByDescending(x => x.CreatedAt)
                 .ToListAsync();
 
-            return Ok(await ToDtosAsync(jobs));
+            var result = await ToDtosAsync(jobs);
+            timer.Stop();
+            _logger.LogInformation(
+                "Survey jobs API loaded. ModuleType={ModuleType}, Status={Status}, AssignedSurveyorUserId={AssignedSurveyorUserId}, IhmCompletionFilter={IhmCompletionFilter}, JobCompletionFilter={JobCompletionFilter}, Jobs={JobCount}, ElapsedMs={ElapsedMs}",
+                moduleType,
+                status,
+                assignedSurveyorUserId,
+                ihmCompletionFilter,
+                jobCompletionFilter,
+                result.Count,
+                timer.ElapsedMilliseconds);
+
+            return Ok(result);
         }
         private static readonly SurveyJobStatus[] CompletedSurveyStatuses =
         {
@@ -712,26 +737,28 @@ namespace Survey_Certification_App.Controllers
             var completedJobs = activeJobs
                 .Where(x => CompletedSurveyStatuses.Contains(x.Status));
 
-            async Task<int> CountCompletedAsync(DateTime? from, DateTime? to = null)
+            var completedJobDates = await completedJobs
+                .Select(x => new
+                {
+                    x.Id,
+                    CompletedAt = x.UpdatedAt ?? x.EndDate ?? x.SurveyDate ?? x.CreatedAt
+                })
+                .ToListAsync();
+
+            int CountCompleted(DateTime? from, DateTime? to = null)
             {
-                var query = completedJobs;
+                var query = completedJobDates.AsEnumerable();
 
                 if (from.HasValue)
-                {
-                    query = query.Where(x =>
-                        (x.UpdatedAt ?? x.EndDate ?? x.SurveyDate ?? x.CreatedAt) >= from.Value);
-                }
+                    query = query.Where(x => x.CompletedAt >= from.Value);
 
                 if (to.HasValue)
-                {
-                    query = query.Where(x =>
-                        (x.UpdatedAt ?? x.EndDate ?? x.SurveyDate ?? x.CreatedAt) < to.Value);
-                }
+                    query = query.Where(x => x.CompletedAt < to.Value);
 
-                return await query
+                return query
                     .Select(x => x.Id)
                     .Distinct()
-                    .CountAsync();
+                    .Count();
             }
 
             var total = await scopedJobs.CountAsync();
@@ -752,7 +779,7 @@ namespace Survey_Certification_App.Controllers
                 .Select(x => x.Id)
                 .Distinct()
                 .ToListAsync();
-            var ihmClassifications = await BuildIhmAuditClassificationsAsync(ihmJobIds, logDetails: true);
+            var ihmClassifications = await BuildIhmAuditClassificationsAsync(ihmJobIds);
             var liveIhmJobs = ihmClassifications.Count(x => !x.IsCompleted);
             var completedIhmJobs = ihmClassifications.Count(x => x.IsCompleted);
             var exSurveyLiveJobs = await activeJobs.CountAsync(x =>
@@ -779,7 +806,7 @@ namespace Survey_Certification_App.Controllers
                     trend.Add(new SurveyCompletionTrendPointDto
                     {
                         Label = monthStart.ToString("MMM"),
-                        Count = await CountCompletedAsync(monthStart, monthEnd)
+                        Count = CountCompleted(monthStart, monthEnd)
                     });
                 }
             }
@@ -793,7 +820,7 @@ namespace Survey_Certification_App.Controllers
                     trend.Add(new SurveyCompletionTrendPointDto
                     {
                         Label = $"W{System.Globalization.ISOWeek.GetWeekOfYear(weekStart)}",
-                        Count = await CountCompletedAsync(weekStart, weekEnd)
+                        Count = CountCompleted(weekStart, weekEnd)
                     });
                 }
             }
@@ -814,10 +841,10 @@ namespace Survey_Certification_App.Controllers
                 ExSurveyReports = exSurveyReports,
                 IhmUsersCount = ihmUsersCount,
                 ExSurveyUsersCount = exSurveyUsersCount,
-                ThisWeekCompletedJobs = await CountCompletedAsync(startOfWeek),
-                ThisMonthCompletedJobs = await CountCompletedAsync(startOfMonth),
-                ThisYearCompletedJobs = await CountCompletedAsync(startOfYear),
-                OverallCompletedJobs = await CountCompletedAsync(null),
+                ThisWeekCompletedJobs = CountCompleted(startOfWeek),
+                ThisMonthCompletedJobs = CountCompleted(startOfMonth),
+                ThisYearCompletedJobs = CountCompleted(startOfYear),
+                OverallCompletedJobs = CountCompleted(null),
                 CompletionTrend = trend
             });
 
@@ -848,14 +875,33 @@ namespace Survey_Certification_App.Controllers
                 .Select(x => x.Id)
                 .Distinct()
                 .ToListAsync();
-            var myClassifications = await BuildIhmAuditClassificationsAsync(myJobIds, logDetails: true);
+            var myClassifications = await BuildIhmAuditClassificationsAsync(myJobIds);
             var liveJobs = myClassifications.Count(x => !x.IsCompleted);
             var completedJobs = myClassifications.Count(x => x.IsCompleted);
+            var completedJobIds = myClassifications
+                .Where(x => x.IsCompleted)
+                .Select(x => x.JobId)
+                .ToHashSet();
+            var today = DateTime.Today;
+            var myJobDueData = await myJobs
+                .Select(x => new
+                {
+                    x.Id,
+                    x.EndDate,
+                    x.Status
+                })
+                .ToListAsync();
+            var dueTodayJobs = myJobDueData.Count(x =>
+                x.EndDate.HasValue &&
+                x.EndDate.Value.Date == today &&
+                !completedJobIds.Contains(x.Id) &&
+                !CompletedSurveyStatuses.Contains(x.Status));
 
             return Ok(new SurveyorDashboardSummaryDto
             {
                 LiveJobs = liveJobs,
-                CompletedJobs = completedJobs
+                CompletedJobs = completedJobs,
+                DueTodayJobs = dueTodayJobs
             });
         }
 
@@ -1063,10 +1109,16 @@ namespace Survey_Certification_App.Controllers
             if (!_access.UserId.HasValue)
                 return false;
 
-            if (!string.Equals(GetCurrentUserRole(), "Surveyor", StringComparison.OrdinalIgnoreCase))
-                return false;
+            if (_access.IsAdmin)
+                return true;
+
+            if (_access.IsManager)
+                return job.CreatedByUserId == _access.UserId.Value;
 
             var userId = _access.UserId.Value;
+
+            if (!string.Equals(GetCurrentUserRole(), "Surveyor", StringComparison.OrdinalIgnoreCase))
+                return false;
 
             if (job.AssignedUserId == userId)
                 return true;
@@ -1324,14 +1376,16 @@ namespace Survey_Certification_App.Controllers
                 .Distinct()
                 .ToList();
 
-            var userNames = await _db.users
-    .Where(u => userIds.Contains(u.Id))
-    .ToDictionaryAsync(
-        u => u.Id,
-        u => !string.IsNullOrWhiteSpace(u.FullName)
-            ? u.FullName
-            : (!string.IsNullOrWhiteSpace(u.Email) ? u.Email : $"User {u.Id}")
-    );
+            var userNames = userIds.Count == 0
+                ? new Dictionary<int, string>()
+                : await _db.users
+                    .AsNoTracking()
+                    .Where(u => userIds.Contains(u.Id))
+                    .ToDictionaryAsync(
+                        u => u.Id,
+                        u => !string.IsNullOrWhiteSpace(u.FullName)
+                            ? u.FullName
+                            : (!string.IsNullOrWhiteSpace(u.Email) ? u.Email : $"User {u.Id}"));
 
             Dictionary<int, IhmSurveyProgress> progressByJobId;
             try
@@ -1794,6 +1848,7 @@ namespace Survey_Certification_App.Controllers
         {
             public int LiveJobs { get; set; }
             public int CompletedJobs { get; set; }
+            public int DueTodayJobs { get; set; }
         }
 
         private sealed record IhmAuditJobClassification(

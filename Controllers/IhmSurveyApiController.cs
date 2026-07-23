@@ -36,14 +36,17 @@ namespace Survey_Certification_App.Controllers
         private readonly ApplicationDbContext _db;
         private readonly AccessScopeService _access;
         private readonly IIhmMarkedImageQueue _markedImageQueue;
+        private readonly ILogger<IhmSurveyApiController> _logger;
         public IhmSurveyApiController(
     ApplicationDbContext db,
     AccessScopeService access,
-    IIhmMarkedImageQueue markedImageQueue)
+    IIhmMarkedImageQueue markedImageQueue,
+    ILogger<IhmSurveyApiController> logger)
         {
             _db = db;
             _access = access;
             _markedImageQueue = markedImageQueue;
+            _logger = logger;
         }
 
         private void QueueMarkedImages(int jobId, bool force = false)
@@ -560,17 +563,21 @@ namespace Survey_Certification_App.Controllers
 
             var output = await process.StandardOutput.ReadToEndAsync();
             var error = await process.StandardError.ReadToEndAsync();
-            var completed = await Task.Run(() => process.WaitForExit(30000));
-            if (!completed)
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            try
+            {
+                await process.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException)
             {
                 try { process.Kill(entireProcessTree: true); } catch { }
-                Console.WriteLine("[IHM] marker region detection timed out.");
+                _logger.LogWarning("IHM marker region detection timed out for image {ImagePath}.", physicalImagePath);
                 return new List<DetectedLayoutMarkerRegionDto>();
             }
 
             if (process.ExitCode != 0)
             {
-                Console.WriteLine("[IHM] marker region detection failed: " + error);
+                _logger.LogWarning("IHM marker region detection failed for image {ImagePath}. Error: {Error}", physicalImagePath, error);
                 return new List<DetectedLayoutMarkerRegionDto>();
             }
 
@@ -583,7 +590,7 @@ namespace Survey_Certification_App.Controllers
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[IHM] marker region detection parse failed: " + ex.Message);
+                _logger.LogWarning(ex, "IHM marker region detection parse failed for image {ImagePath}.", physicalImagePath);
                 return new List<DetectedLayoutMarkerRegionDto>();
             }
         }
@@ -966,10 +973,7 @@ namespace Survey_Certification_App.Controllers
             }
             catch (Exception ex)
             {
-                Console.WriteLine("========================================");
-                Console.WriteLine("IMPORT EXCEL EXCEPTION");
-                Console.WriteLine(ex.ToString());
-                Console.WriteLine("========================================");
+                _logger.LogError(ex, "IHM Excel import failed for job {JobId}.", jobId);
 
                 return StatusCode(500, new
                 {
@@ -2293,11 +2297,11 @@ namespace Survey_Certification_App.Controllers
 
             if (!string.IsNullOrWhiteSpace(appendix4MarkedImage))
             {
-                Console.WriteLine($"Using pre-generated marked image. jobId={jobId} section=Appendix4 path={appendix4MarkedImage}");
+                _logger.LogDebug("Using pre-generated marked image. JobId={JobId}, Section={Section}, Path={Path}", jobId, IhmMarkedImageSectionType.Appendix4, appendix4MarkedImage);
             }
             else
             {
-                Console.WriteLine($"Marked image missing. jobId={jobId} section=Appendix4");
+                _logger.LogDebug("Marked image missing. JobId={JobId}, Section={Section}", jobId, IhmMarkedImageSectionType.Appendix4);
             }
             var hazardousMarkedImage = await _db.IhmMarkedImageMetadata
                 .Where(x => x.SurveyJobId == jobId &&
@@ -2310,11 +2314,11 @@ namespace Survey_Certification_App.Controllers
 
             if (!string.IsNullOrWhiteSpace(hazardousMarkedImage))
             {
-                Console.WriteLine($"Using pre-generated marked image. jobId={jobId} section=Hazardous path={hazardousMarkedImage}");
+                _logger.LogDebug("Using pre-generated marked image. JobId={JobId}, Section={Section}, Path={Path}", jobId, IhmMarkedImageSectionType.Hazardous, hazardousMarkedImage);
             }
             else
             {
-                Console.WriteLine($"Marked image missing. jobId={jobId} section=Hazardous. PDF will continue without hazardous I-2 marked images.");
+                _logger.LogDebug("Marked image missing. JobId={JobId}, Section={Section}. PDF will continue without hazardous I-2 marked images.", jobId, IhmMarkedImageSectionType.Hazardous);
                 hazardousMarkedImage = null;
             }
             var outputFolder = Path.Combine(
@@ -2348,31 +2352,31 @@ namespace Survey_Certification_App.Controllers
                     job.EndDate,
                     Status = job.Status.ToString()
                 },
-                Vessel = vessel == null ? null : new
+                Vessel = new
                 {
-                    vessel.Id,
-                    vessel.VesselName,
-                    vessel.ImoNumber,
-                    vessel.OfficialNumber,
-                    vessel.VesselType,
-                    vessel.Flag,
-                    vessel.PortOfRegistry,
-                    vessel.ClassSociety,
-                    vessel.GrossTonnage,
-                    vessel.NetTonnage,
-                    vessel.Deadweight,
-                    vessel.LengthOverall,
-                    vessel.Breadth,
-                    vessel.Depth,
-                    vessel.YearBuilt,
-                    vessel.OwnerName,
-                    vessel.ManagerName,
-                    vessel.ClientName,
-                    vessel.CallSign,
-                    vessel.Builder,
-                    vessel.DateOfBuild,
-                    vessel.LengthBetweenPerpendiculars,
-                    vessel.DraughtMoulded
+                    Id = vessel?.Id ?? job.VesselId,
+                    VesselName = vessel?.VesselName ?? job.VesselName,
+                    ImoNumber = vessel?.ImoNumber ?? job.ImoNumber,
+                    OfficialNumber = vessel?.OfficialNumber,
+                    VesselType = vessel?.VesselType,
+                    Flag = vessel?.Flag,
+                    PortOfRegistry = vessel?.PortOfRegistry,
+                    ClassSociety = vessel?.ClassSociety,
+                    GrossTonnage = vessel?.GrossTonnage,
+                    NetTonnage = vessel?.NetTonnage,
+                    Deadweight = vessel?.Deadweight,
+                    LengthOverall = vessel?.LengthOverall,
+                    Breadth = vessel?.Breadth,
+                    Depth = vessel?.Depth,
+                    YearBuilt = vessel?.YearBuilt,
+                    OwnerName = vessel?.OwnerName,
+                    ManagerName = vessel?.ManagerName,
+                    ClientName = vessel?.ClientName ?? job.ClientName,
+                    CallSign = vessel?.CallSign,
+                    Builder = vessel?.Builder,
+                    DateOfBuild = vessel?.DateOfBuild,
+                    LengthBetweenPerpendiculars = vessel?.LengthBetweenPerpendiculars,
+                    DraughtMoulded = vessel?.DraughtMoulded
                 },
                 ReportInfo = reportInfo == null ? null : new
                 {
@@ -2593,7 +2597,7 @@ namespace Survey_Certification_App.Controllers
                         FilePath = outputPdfPath
                     };
 
-                    Console.WriteLine($"IHM PDF job {jobId} completed in {sw.ElapsedMilliseconds} ms");
+                    _logger.LogInformation("IHM PDF job {JobId} completed in {ElapsedMilliseconds} ms.", jobId, sw.ElapsedMilliseconds);
                 }
                 catch (Exception ex)
                 {
@@ -2606,7 +2610,7 @@ namespace Survey_Certification_App.Controllers
                         Error = ex.GetBaseException().Message
                     };
 
-                    Console.Error.WriteLine($"IHM PDF job {jobId} failed after {sw.ElapsedMilliseconds} ms: {ex}");
+                    _logger.LogError(ex, "IHM PDF job {JobId} failed after {ElapsedMilliseconds} ms.", jobId, sw.ElapsedMilliseconds);
                 }
             });
 
