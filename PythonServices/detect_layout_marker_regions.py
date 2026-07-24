@@ -4,6 +4,43 @@ import cv2
 import numpy as np
 import os
 import re
+import traceback
+from datetime import datetime
+from pathlib import Path
+GLOBAL_DEBUG_LOG = Path(
+    r"C:\inetpub\wwwroot\Survey\wwwroot\reports\ihm\ocr_script_startup.txt"
+)
+
+
+def global_debug_log(message):
+    """Write every OCR diagnostic message into one common server log file."""
+    line = f"{datetime.now():%Y-%m-%d %H:%M:%S} | {message}"
+
+    try:
+        GLOBAL_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+        with GLOBAL_DEBUG_LOG.open("a", encoding="utf-8") as log_file:
+            log_file.write(line + "\n")
+            log_file.flush()
+
+    except Exception as log_error:
+        print(
+            f"OCR LOG WRITE ERROR | "
+            f"PATH={GLOBAL_DEBUG_LOG} | "
+            f"ERROR={repr(log_error)}",
+            file=sys.stderr,
+            flush=True
+        )
+
+
+global_debug_log(
+    "OCR MODULE LOADED | "
+    f"FILE={Path(__file__).resolve()} | "
+    f"PYTHON={sys.executable} | "
+    f"ARGS={sys.argv} | "
+    f"CWD={os.getcwd()}"
+)
+
 
 def normalize_label(value):
     text = str(value or "").upper().strip()
@@ -14,29 +51,26 @@ def normalize_label(value):
     return text
 
 def detect_regions(image_path):
-    DEBUG_FILE = os.path.join(os.path.dirname(image_path), "ocr_debug.txt")
+    image_path_obj = Path(image_path)
 
     def debug_log(message):
-        try:
-            os.makedirs(os.path.dirname(DEBUG_FILE), exist_ok=True)
-            with open(DEBUG_FILE, "a", encoding="utf-8") as f:
-                f.write(str(message) + "\n")
-        except Exception:
-            pass
+        global_debug_log(message)
 
-    debug_log("\n===================================")
+    debug_log("===================================")
+    debug_log("START Auto Map OCR")
     debug_log(f"IMAGE_PATH={image_path}")
-    debug_log(f"IMAGE_EXISTS={os.path.exists(image_path)}")
-    debug_log(f"IMAGE_FILE_SIZE={os.path.getsize(image_path) if os.path.exists(image_path) else 0}")
     debug_log(f"CWD={os.getcwd()}")
     debug_log(f"PYTHON={sys.executable}")
+    debug_log(f"IMAGE_EXISTS={os.path.exists(image_path)}")
+    debug_log(f"IMAGE_FILE_SIZE={os.path.getsize(image_path) if os.path.exists(image_path) else 0}")
 
+    debug_log("START cv2.imread")
     img = cv2.imread(image_path)
-    debug_log(f"IMAGE_LOADED={img is not None}")
+    debug_log(f"END cv2.imread | IMAGE_LOADED={img is not None}")
 
     if img is None:
-        debug_log("STOP_REASON=cv2.imread returned None")
-        debug_log("========== OCR END ==========")
+        debug_log("STOP Auto Map OCR. Reason=cv2.imread returned None")
+        debug_log("END Auto Map OCR")
         return []
 
     original_h, original_w = img.shape[:2]
@@ -47,11 +81,33 @@ def detect_regions(image_path):
     debug_log(f"IMAGE_SIZE={original_w}x{original_h}")
 
     try:
+        debug_log("START import pytesseract")
         import pytesseract
+        debug_log(
+            f"END import pytesseract | "
+            f"PYTESSERACT_VERSION={getattr(pytesseract, '__version__', 'unknown')}"
+        )
 
-        tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        tesseract_path = r"C:\Users\Administrator\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+        debug_log(
+            f"TESSERACT_PATH={tesseract_path} | "
+            f"TESSERACT_EXISTS={os.path.exists(tesseract_path)}"
+        )
+
         if os.path.exists(tesseract_path):
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
+            debug_log("TESSERACT_COMMAND_CONFIGURED")
+        else:
+            debug_log("TESSERACT_EXECUTABLE_NOT_FOUND")
+
+        try:
+            debug_log(
+                f"TESSERACT_VERSION={pytesseract.get_tesseract_version()}"
+            )
+        except Exception as version_error:
+            debug_log(
+                f"TESSERACT_VERSION_ERROR={repr(version_error)}"
+            )
 
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         debug_log("Image loaded and HSV converted")
@@ -75,12 +131,13 @@ def detect_regions(image_path):
         join_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2))
         label_mask = cv2.dilate(label_mask, join_kernel, iterations=1)
 
+        debug_log("START findContours")
         contours, _ = cv2.findContours(
             label_mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
         )
-        debug_log(f"CONTOURS_FOUND={len(contours)}")
+        debug_log(f"END findContours | CONTOURS_FOUND={len(contours)}")
         boxes = []
 
         for contour in contours:
@@ -98,6 +155,8 @@ def detect_regions(image_path):
 
             boxes.append((x, y, w, h))
             debug_log(f"BOX_ACCEPTED x={x}, y={y}, w={w}, h={h}, aspect={aspect}")
+        debug_log(f"ACCEPTED_BOX_COUNT={len(boxes)}")
+        debug_log("START BLUE BOX OCR")
         for x, y, w, h in boxes:
             # Crop inside the blue box border, not the connector line.
             pad = 16
@@ -128,6 +187,9 @@ def detect_regions(image_path):
                     break
 
                 for psm in psm_group:
+                    debug_log(
+                        f"START BOX OCR | x={x}, y={y}, w={w}, h={h}, PSM={psm}"
+                    )
                     raw = pytesseract.image_to_string(
                         crop_gray,
                         config=(
@@ -138,7 +200,10 @@ def detect_regions(image_path):
                     )
 
                     label = normalize_label(raw)
-                    debug_log(f"BOX x={x}, y={y}, w={w}, h={h}, PSM={psm}, RAW={raw.strip()}, LABEL={label}")
+                    debug_log(
+                        f"END BOX OCR | x={x}, y={y}, w={w}, h={h}, "
+                        f"PSM={psm}, RAW={raw.strip()}, LABEL={label}"
+                    )
                     matches = re.findall(r"(?<![A-Z0-9])[SV]\d{1,3}(?![A-Z0-9])", label)
                     if not matches:
                         continue
@@ -171,6 +236,8 @@ def detect_regions(image_path):
                     break
                 # Fallback OCR over the full layout. This catches marker labels missed by
         # the blue-box contour pass because of thin borders, broken boxes, or tight crops.
+        debug_log("END BLUE BOX OCR")
+        debug_log("START FULL IMAGE OCR FALLBACK")
         try:
             full_big = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
             full_gray = cv2.cvtColor(full_big, cv2.COLOR_BGR2GRAY)
@@ -182,6 +249,7 @@ def detect_regions(image_path):
                 cv2.THRESH_BINARY + cv2.THRESH_OTSU
             )[1]
 
+            debug_log("START pytesseract.image_to_data")
             ocr_data = pytesseract.image_to_data(
                 full_gray,
                 config=(
@@ -190,6 +258,11 @@ def detect_regions(image_path):
                 ),
                 output_type=pytesseract.Output.DICT,
                 timeout=8
+            )
+
+            debug_log(
+                f"END pytesseract.image_to_data | "
+                f"WORD_COUNT={len(ocr_data.get('text', []))}"
             )
 
             for i, raw in enumerate(ocr_data.get("text", [])):
@@ -242,19 +315,69 @@ def detect_regions(image_path):
 
                     debug_log(f"FALLBACK_DETECTED text={text}, conf={confidence}, x={x}, y={y}, w={w}, h={h}")
 
+            debug_log("END FULL IMAGE OCR FALLBACK")
         except Exception as fallback_ex:
-            debug_log(f"FULL_IMAGE_OCR_FALLBACK_ERROR: {fallback_ex}")
+            debug_log(f"FULL_IMAGE_OCR_FALLBACK_ERROR: {repr(fallback_ex)}")
+            debug_log(traceback.format_exc())
         debug_log(f"BOXES_FOUND={len(boxes)}")
         debug_log(f"DETECTED={list(detected.keys())}")
         debug_log("========== OCR END ==========")
         return list(detected.values())
 
     except Exception as ex:
-        debug_log(f"OCR_ERROR: {ex}")
-        print(f"OCR_ERROR: {ex}", file=sys.stderr)
+        debug_log(f"OCR_ERROR: {repr(ex)}")
+        debug_log(traceback.format_exc())
+        print(f"OCR_ERROR: {ex}", file=sys.stderr, flush=True)
         return list(detected.values())
 
 if __name__ == "__main__":
-    image_path = sys.argv[1]
-    regions = detect_regions(image_path)
-    print(json.dumps(regions))
+    try:
+        global_debug_log("===================================")
+        global_debug_log("MAIN START")
+        global_debug_log(f"FILE={Path(__file__).resolve()}")
+        global_debug_log(f"PYTHON={sys.executable}")
+        global_debug_log(f"CWD={os.getcwd()}")
+        global_debug_log(f"ARGS={sys.argv}")
+
+        if len(sys.argv) < 2:
+            raise ValueError(
+                f"Image path argument missing. Received arguments: {sys.argv}"
+            )
+
+        image_path = sys.argv[1]
+
+        global_debug_log(f"IMAGE_ARGUMENT={repr(image_path)}")
+        global_debug_log(f"IMAGE_ARGUMENT_LENGTH={len(image_path)}")
+        global_debug_log(
+            f"IMAGE_EXISTS_BEFORE_OCR={Path(image_path).exists()}"
+        )
+
+        if Path(image_path).exists():
+            global_debug_log(
+                f"IMAGE_SIZE_BEFORE_OCR={Path(image_path).stat().st_size}"
+            )
+
+        global_debug_log("CALLING detect_regions")
+        regions = detect_regions(image_path)
+        global_debug_log(
+            f"detect_regions RETURNED | COUNT={len(regions)}"
+        )
+
+        result_json = json.dumps(regions)
+        print(result_json, flush=True)
+
+        global_debug_log(
+            f"JSON OUTPUT WRITTEN TO STDOUT | LENGTH={len(result_json)}"
+        )
+        global_debug_log(
+            f"MAIN END | REGIONS={len(regions)}"
+        )
+
+    except Exception:
+        error_text = traceback.format_exc()
+
+        global_debug_log("MAIN ERROR")
+        global_debug_log(error_text)
+
+        print(error_text, file=sys.stderr, flush=True)
+        raise
