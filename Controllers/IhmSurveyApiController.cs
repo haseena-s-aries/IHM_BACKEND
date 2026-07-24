@@ -37,18 +37,21 @@ namespace Survey_Certification_App.Controllers
         private readonly AccessScopeService _access;
         private readonly IIhmMarkedImageQueue _markedImageQueue;
         private readonly ILogger<IhmSurveyApiController> _logger;
+        private readonly IWebHostEnvironment _env;
         public IhmSurveyApiController(
     ApplicationDbContext db,
     AccessScopeService access,
     IIhmMarkedImageQueue markedImageQueue,
-    ILogger<IhmSurveyApiController> logger)
+    ILogger<IhmSurveyApiController> logger,
+    IWebHostEnvironment env)
         {
             _db = db;
             _access = access;
             _markedImageQueue = markedImageQueue;
             _logger = logger;
+            _env = env;
         }
-
+        [Route("api/ihm-survey")]
         private void QueueMarkedImages(int jobId, bool force = false)
         {
             _markedImageQueue.Queue(jobId, IhmMarkedImageSectionType.Appendix4, force);
@@ -1110,6 +1113,109 @@ namespace Survey_Certification_App.Controllers
                 return Ok(ToSamplingPhotoDto(uploadedPhotos[0]));
 
             return Ok(uploadedPhotos.Select(ToSamplingPhotoDto).ToList());
+        }
+        [HttpPost("checkpoints/{checkpointId:int}/appendix-three-selection")]
+        public async Task<IActionResult> SaveAppendixFourSelection(
+    int checkpointId,
+    [FromBody] AppendixFourSelectionRequest request)
+        {
+            if (request.PhotoIds == null || request.PhotoIds.Count > 2)
+                return BadRequest("Only 2 images can be selected for Appendix 4.");
+
+            var photos = await _db.IhmSamplingPhotos
+                .Where(x => x.IhmCheckpointId == checkpointId)
+                .ToListAsync();
+
+            foreach (var photo in photos)
+            {
+                var index = request.PhotoIds.IndexOf(photo.Id);
+                photo.ShowInAppendixThree = index >= 0;
+                photo.AppendixThreeSortOrder = index >= 0 ? index + 1 : 0;
+            }
+
+            await _db.SaveChangesAsync();
+
+            return Ok(photos.Select(ToSamplingPhotoDto).ToList());
+        }
+        [HttpPost("sampling-photos/{photoId:int}/appendix-three-rotate")]
+        public async Task<IActionResult> RotateAppendixThreeImage(int photoId)
+        {
+            var photo = await _db.IhmSamplingPhotos.FindAsync(photoId);
+            if (photo == null) return NotFound("Sampling photo not found.");
+
+            var sourcePath = string.IsNullOrWhiteSpace(photo.AppendixThreeEditedFilePath)
+                ? photo.FilePath
+                : photo.AppendixThreeEditedFilePath;
+
+            var sourceFullPath = Path.Combine(
+                _env.WebRootPath,
+                sourcePath.TrimStart('/', '\\').Replace('/', Path.DirectorySeparatorChar)
+            );
+
+            if (!System.IO.File.Exists(sourceFullPath))
+                return NotFound("Source image file not found.");
+
+            var folder = Path.Combine(_env.WebRootPath, "uploads", "ihm-appendix-three", photo.SurveyJobId.ToString());
+            Directory.CreateDirectory(folder);
+
+            var fileName = $"{Guid.NewGuid():N}.jpg";
+            var fullPath = Path.Combine(folder, fileName);
+
+            using (var image = await ImageSharpImage.LoadAsync(sourceFullPath))
+            {
+                image.Mutate(x => x.Rotate(90));
+                await image.SaveAsJpegAsync(fullPath, new JpegEncoder { Quality = 90 });
+
+                photo.AppendixThreeWidth = image.Width;
+                photo.AppendixThreeHeight = image.Height;
+            }
+
+            photo.AppendixThreeEditedFilePath = $"/uploads/ihm-appendix-three/{photo.SurveyJobId}/{fileName}";
+
+            await _db.SaveChangesAsync();
+            return Ok(ToSamplingPhotoDto(photo));
+        }
+
+        [HttpPost("sampling-photos/{photoId:int}/appendix-three-edit")]
+        public async Task<IActionResult> SaveAppendixThreeEditedImage(
+            int photoId,
+            IFormFile file,
+            [FromForm] int width,
+            [FromForm] int height)
+        {
+            var photo = await _db.IhmSamplingPhotos.FindAsync(photoId);
+            if (photo == null) return NotFound();
+
+            if (file == null || file.Length == 0)
+                return BadRequest("Edited image is required.");
+
+            var folder = Path.Combine(_env.WebRootPath, "uploads", "ihm-appendix-three", photo.SurveyJobId.ToString());
+            Directory.CreateDirectory(folder);
+
+            var fileName = $"{Guid.NewGuid():N}{Path.GetExtension(file.FileName)}";
+            var fullPath = Path.Combine(folder, fileName);
+
+            await using (var stream = System.IO.File.Create(fullPath))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            photo.AppendixThreeEditedFilePath = $"/uploads/ihm-appendix-three/{photo.SurveyJobId}/{fileName}";
+
+            using (var image = await ImageSharpImage.LoadAsync(fullPath))
+            {
+                photo.AppendixThreeWidth = image.Width;
+                photo.AppendixThreeHeight = image.Height;
+            }
+
+            await _db.SaveChangesAsync();
+
+            return Ok(ToSamplingPhotoDto(photo));
+        }
+
+        public class AppendixFourSelectionRequest
+        {
+            public List<int> PhotoIds { get; set; } = new();
         }
         [HttpDelete("sampling-photos/{photoId:int}")]
         public async Task<IActionResult> DeleteSamplingPhoto(int photoId)
@@ -2248,7 +2354,12 @@ namespace Survey_Certification_App.Controllers
                     x.OriginalFileName,
                     x.FilePath,
                     x.ContentType,
-                    x.UploadedAt
+                    x.UploadedAt,
+                    x.ShowInAppendixThree,
+                    x.AppendixThreeSortOrder,
+                    x.AppendixThreeEditedFilePath,
+                    x.AppendixThreeWidth,
+                    x.AppendixThreeHeight
                 })
                 .ToListAsync();
 
@@ -3139,7 +3250,12 @@ namespace Survey_Certification_App.Controllers
                 ContentType = item.ContentType,
                 Caption = item.Caption,
                 UploadedByUserId = item.UploadedByUserId,
-                UploadedAt = item.UploadedAt
+                UploadedAt = item.UploadedAt,
+                ShowInAppendixThree = item.ShowInAppendixThree,
+                AppendixThreeSortOrder = item.AppendixThreeSortOrder,
+                AppendixThreeEditedFilePath = item.AppendixThreeEditedFilePath,
+                AppendixThreeWidth = item.AppendixThreeWidth,
+                AppendixThreeHeight = item.AppendixThreeHeight,
             };
         }
     }
@@ -3301,6 +3417,11 @@ namespace Survey_Certification_App.Controllers
         public string? Caption { get; set; }
         public int UploadedByUserId { get; set; }
         public DateTime UploadedAt { get; set; }
+        public bool ShowInAppendixThree { get; set; }
+        public int AppendixThreeSortOrder { get; set; }
+        public string? AppendixThreeEditedFilePath { get; set; }
+        public int? AppendixThreeWidth { get; set; }
+        public int? AppendixThreeHeight { get; set; }
     }
     public class IhmExcelAreaDto
     {

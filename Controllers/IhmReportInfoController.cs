@@ -379,11 +379,28 @@ public class IhmReportInfoController : ControllerBase
             .ToListAsync();
 
         var appendixThreePhotos = await _db.IhmSamplingPhotos
-            .Where(x => _db.IhmCheckpoints.Any(cp =>
-                cp.Id == x.IhmCheckpointId &&
-                cp.SurveyJobId == jobId))
-            .OrderBy(x => x.UploadedAt)
-            .ToListAsync();
+    .Where(x => _db.IhmCheckpoints.Any(cp =>
+        cp.Id == x.IhmCheckpointId &&
+        cp.SurveyJobId == jobId))
+    .Where(x => x.ShowInAppendixThree)
+    .OrderBy(x => x.AppendixThreeSortOrder)
+    .ThenBy(x => x.UploadedAt)
+    .Take(2)
+    .Select(photo => new
+    {
+        photo.Id,
+        photo.SurveyJobId,
+        photo.IhmAreaId,
+        photo.IhmCheckpointId,
+        photo.OriginalFileName,
+        FilePath = string.IsNullOrWhiteSpace(photo.AppendixThreeEditedFilePath)
+            ? photo.FilePath
+            : photo.AppendixThreeEditedFilePath,
+        photo.ContentType,
+        photo.UploadedAt
+    })
+    .ToListAsync();
+     
         if (!appendixOneResultPoints.Any())
         {
             appendixOneResultPoints = BuildDefaultAppendixOnePoints(jobId);

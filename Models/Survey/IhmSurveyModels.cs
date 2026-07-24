@@ -183,6 +183,11 @@ namespace Survey_Certification_App.Models.Survey
         public string? Caption { get; set; }
 
         public int UploadedByUserId { get; set; }
+        public bool ShowInAppendixThree { get; set; }
+        public int AppendixThreeSortOrder { get; set; }
+        public string? AppendixThreeEditedFilePath { get; set; }
+        public int? AppendixThreeWidth { get; set; }
+        public int? AppendixThreeHeight { get; set; }
 
         public DateTime UploadedAt { get; set; } = DateTime.UtcNow;
 
@@ -191,6 +196,7 @@ namespace Survey_Certification_App.Models.Survey
         public IhmArea? IhmArea { get; set; }
 
         public IhmCheckpoint? IhmCheckpoint { get; set; }
+
     }
     public enum IhmMarkedImageSectionType
     {

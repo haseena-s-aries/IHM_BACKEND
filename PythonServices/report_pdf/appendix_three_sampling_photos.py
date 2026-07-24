@@ -71,15 +71,35 @@ def _result_value(checkpoint):
 def _checkpoint_photos(data, checkpoint_id):
     photos = data.get("photos") or []
 
-    matching_photos = [
+    checkpoint_photos = [
         photo for photo in photos
         if str(photo.get("ihmCheckpointId")) == str(checkpoint_id)
     ]
 
-    matching_photos.sort(
-        key=lambda photo: txt(photo.get("uploadedAt")),
-        reverse=True
-    )
+    selected_photos = [
+        photo for photo in checkpoint_photos
+        if bool(photo.get("showInAppendixThree") or photo.get("ShowInAppendixThree"))
+    ]
+
+    if selected_photos:
+        matching_photos = selected_photos
+        matching_photos.sort(
+            key=lambda photo: (
+                int(photo.get("appendixThreeSortOrder") or photo.get("AppendixThreeSortOrder") or 0),
+                txt(photo.get("uploadedAt") or photo.get("UploadedAt")),
+            )
+        )
+    else:
+        matching_photos = checkpoint_photos
+        matching_photos.sort(
+            key=lambda photo: txt(photo.get("uploadedAt") or photo.get("UploadedAt")),
+            reverse=True
+        )
+
+    for photo in matching_photos:
+        edited_path = photo.get("appendixThreeEditedFilePath") or photo.get("AppendixThreeEditedFilePath")
+        if edited_path:
+            photo["filePath"] = edited_path
 
     return matching_photos[:2]
 
