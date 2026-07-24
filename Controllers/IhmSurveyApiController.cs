@@ -1881,6 +1881,9 @@ namespace Survey_Certification_App.Controllers
         [HttpPost("jobs/{jobId:int}/generate-report")]
         public async Task<IActionResult> GenerateReport(int jobId)
         {
+            if (!await _access.CanManageReportAsync("ihm", jobId))
+                return Forbid();
+
             var unresolvedConflicts = await _db.IhmCheckpointSubmissions.CountAsync(x =>
                 x.SurveyJobId == jobId &&
                 x.Status == IhmCheckpointSubmissionStatus.Conflict);

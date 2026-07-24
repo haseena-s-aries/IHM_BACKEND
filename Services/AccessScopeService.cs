@@ -198,17 +198,15 @@ namespace Survey_Certification_App.Services
                 "ihm" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
                     x.Id == reportId &&
                     x.ModuleType == SurveyModuleType.IhmSurvey &&
-                    x.ProjectId.HasValue &&
-                    managedProjectIds.Contains(x.ProjectId.Value) &&
                     (x.CreatedByUserId == UserId.Value ||
-                     x.AssignedManagerId == UserId.Value)),
+                     x.AssignedManagerId == UserId.Value ||
+                     (x.ProjectId.HasValue && managedProjectIds.Contains(x.ProjectId.Value)))),
                 "exsurvey" => await _db.SurveyJobs.AsNoTracking().AnyAsync(x =>
                     x.Id == reportId &&
                     x.ModuleType == SurveyModuleType.ExSurvey &&
-                    x.ProjectId.HasValue &&
-                    managedProjectIds.Contains(x.ProjectId.Value) &&
                     (x.CreatedByUserId == UserId.Value ||
-                     x.AssignedManagerId == UserId.Value)),
+                     x.AssignedManagerId == UserId.Value ||
+                     (x.ProjectId.HasValue && managedProjectIds.Contains(x.ProjectId.Value)))),
                 "seafastening" => ProjectId == 3 && await _db.SeaFastenings.AsNoTracking()
                     .AnyAsync(x => x.Id == reportId && x.UserId == UserId.Value.ToString()),
                 "towage" or "loadout" => false,

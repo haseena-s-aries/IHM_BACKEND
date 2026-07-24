@@ -4,6 +4,7 @@ using Microsoft.VisualBasic.FileIO;
 using Survey_Certification_App.Data;
 using Survey_Certification_App.Models;
 using Survey_Certification_App.Models.Survey;
+using Survey_Certification_App.Services;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 
@@ -12,10 +13,12 @@ using System.Text.RegularExpressions;
 public class IhmReportInfoController : ControllerBase
 {
     private readonly ApplicationDbContext _db;
+    private readonly AccessScopeService _access;
 
-    public IhmReportInfoController(ApplicationDbContext db)
+    public IhmReportInfoController(ApplicationDbContext db, AccessScopeService access)
     {
         _db = db;
+        _access = access;
     }
 
     [HttpGet("companies")]
@@ -665,6 +668,9 @@ public class IhmReportInfoController : ControllerBase
         var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
         if (!jobExists) return NotFound("Survey job not found.");
 
+        if (!await CanManageIhmReportAsync(jobId))
+            return Forbid();
+
         if (file == null || file.Length == 0)
             return BadRequest("File is required.");
 
@@ -707,6 +713,9 @@ public class IhmReportInfoController : ControllerBase
         var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
         if (!jobExists)
             return NotFound("Survey job not found.");
+
+        if (!await CanManageIhmReportAsync(jobId))
+            return Forbid();
 
         if (files == null || files.Count == 0)
             return BadRequest("Files are required.");
@@ -853,6 +862,12 @@ public class IhmReportInfoController : ControllerBase
     [HttpDelete("jobs/{jobId:int}/appendix-attachments/{id:int}")]
     public async Task<IActionResult> DeleteAppendixAttachment(int jobId, int id)
     {
+        if (!await _db.SurveyJobs.AnyAsync(x => x.Id == jobId))
+            return NotFound("Survey job not found.");
+
+        if (!await CanManageIhmReportAsync(jobId))
+            return Forbid();
+
         var item = await _db.IhmAppendixTwoAttachments
             .FirstOrDefaultAsync(x => x.Id == id && x.SurveyJobId == jobId);
 
@@ -880,6 +895,12 @@ public class IhmReportInfoController : ControllerBase
         int appendixNo,
         [FromBody] UpdateCustomAppendixTitleRequest request)
     {
+        if (!await _db.SurveyJobs.AnyAsync(x => x.Id == jobId))
+            return NotFound("Survey job not found.");
+
+        if (!await CanManageIhmReportAsync(jobId))
+            return Forbid();
+
         var items = await _db.IhmAppendixTwoAttachments
             .Where(x => x.SurveyJobId == jobId &&
                         x.AppendixType == "Custom" &&
@@ -909,6 +930,10 @@ public class IhmReportInfoController : ControllerBase
 
         if (!currentJobExists || !sourceJobExists)
             return NotFound("Job not found.");
+
+        if (!await CanManageIhmReportAsync(jobId) ||
+            !await CanManageIhmReportAsync(sourceJobId))
+            return Forbid();
 
         var oldItems = await _db.IhmAppendixTwoAttachments
             .Where(x => x.SurveyJobId == jobId)
@@ -980,6 +1005,9 @@ public class IhmReportInfoController : ControllerBase
     {
         var jobExists = await _db.SurveyJobs.AnyAsync(x => x.Id == jobId);
         if (!jobExists) return NotFound("Survey job not found.");
+
+        if (!await CanManageIhmReportAsync(jobId))
+            return Forbid();
 
         var existing = await _db.IhmReportInfos
             .FirstOrDefaultAsync(x => x.SurveyJobId == jobId);
@@ -1243,6 +1271,11 @@ public class IhmReportInfoController : ControllerBase
         }
         await _db.SaveChangesAsync();
         return Ok(existing);
+    }
+
+    private Task<bool> CanManageIhmReportAsync(int jobId)
+    {
+        return _access.CanManageReportAsync("ihm", jobId);
     }
 
     private async Task UpsertCompany(SaveIhmReportInfoRequest request)
