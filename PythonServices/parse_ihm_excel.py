@@ -1,7 +1,7 @@
 import json
 
 import sys
-
+from io import BytesIO
 from collections import OrderedDict
 
 from openpyxl import load_workbook
@@ -127,6 +127,7 @@ def parse_sheet(ws):
         check_result = clean(ws.cell(row=row, column=15).value)
 
         remarks = clean(ws.cell(row=row, column=16).value)
+        location_remarks = clean(ws.cell(row=row, column=17).value)
  
         if not sample_no and not hazardous_material and not location and not equipment_name:
 
@@ -187,6 +188,7 @@ def parse_sheet(ws):
             "checkResult": check_result,
 
             "remarks": remarks,
+            "locationRemarks": location_remarks,
 
             "sourceRowNumber": row
 
@@ -197,25 +199,17 @@ def parse_sheet(ws):
  
 def main():
 
-    if len(sys.argv) < 2:
-
-        print(json.dumps({
-
-            "success": False,
-
-            "message": "Excel path is required.",
-
-            "areas": []
-
-        }))
-
-        return
- 
-    excel_path = sys.argv[1]
- 
     try:
 
-        wb = load_workbook(excel_path, data_only=True)
+        if len(sys.argv) >= 2:
+            excel_source = sys.argv[1]
+        else:
+            excel_bytes = sys.stdin.buffer.read()
+            if not excel_bytes:
+                raise ValueError("Excel file is required.")
+            excel_source = BytesIO(excel_bytes)
+
+        wb = load_workbook(excel_source, data_only=True)
 
         all_areas = []
  

@@ -52,6 +52,8 @@ namespace Survey_Certification_App.Controllers
             _env = env;
         }
         [Route("api/ihm-survey")]
+
+        
         private void QueueMarkedImages(int jobId, bool force = false)
         {
             _markedImageQueue.Queue(jobId, IhmMarkedImageSectionType.Appendix4, force);
@@ -644,28 +646,21 @@ namespace Survey_Certification_App.Controllers
                     return BadRequest("Only .xlsx Excel files are allowed.");
 
                 var uploadFolder = Path.Combine(
-                Directory.GetCurrentDirectory(),
-                "wwwroot",
-                "uploads",
-                "ihm-excel"
-            );
+                    Directory.GetCurrentDirectory(),
+                    "wwwroot",
+                    "uploads",
+                    "ihm-excel"
+                );
 
                 Directory.CreateDirectory(uploadFolder);
 
                 var storedFileName = $"{jobId}_{Guid.NewGuid()}{extension}";
                 var filePath = Path.Combine(uploadFolder, storedFileName);
                 var relativeExcelPath = $"/uploads/ihm-excel/{storedFileName}";
-                var previousChecklist = await _db.SurveyUploadedFiles
-                    .Where(x => x.SurveyJobId == jobId && x.FileType == VscpChecklistFileType)
-                    .OrderByDescending(x => x.UploadedAt)
-                    .FirstOrDefaultAsync();
-                var previousChecklistPath = previousChecklist?.FilePath
-                    ?? FindLatestLegacyVscpChecklistPath(jobId);
 
-                await using (var stream = new FileStream(filePath, FileMode.Create))
-                {
-                    await file.CopyToAsync(stream);
-                }
+                await using var excelMemory = new MemoryStream();
+                await file.CopyToAsync(excelMemory);
+                var excelBytes = excelMemory.ToArray();
 
                 var parserPath = Path.Combine(
                     Directory.GetCurrentDirectory(),
@@ -679,7 +674,8 @@ namespace Survey_Certification_App.Controllers
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = "python",
-                    Arguments = $"\"{parserPath}\" \"{filePath}\"",
+                    Arguments = $"\"{parserPath}\"",
+                    RedirectStandardInput = true,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -690,6 +686,9 @@ namespace Survey_Certification_App.Controllers
 
                 if (process == null)
                     return StatusCode(500, "Unable to start Python parser.");
+
+                await process.StandardInput.BaseStream.WriteAsync(excelBytes, 0, excelBytes.Length);
+                process.StandardInput.Close();
 
                 var output = await process.StandardOutput.ReadToEndAsync();
                 var error = await process.StandardError.ReadToEndAsync();
@@ -722,7 +721,16 @@ namespace Survey_Certification_App.Controllers
                         assign(value);
                 }
 
+                var previousChecklist = await _db.SurveyUploadedFiles
+                    .Where(x => x.SurveyJobId == jobId && x.FileType == VscpChecklistFileType)
+                    .OrderByDescending(x => x.UploadedAt)
+                    .FirstOrDefaultAsync();
+
+                var previousChecklistPath = previousChecklist?.FilePath
+                    ?? FindLatestLegacyVscpChecklistPath(jobId);
+
                 await using var transaction = await _db.Database.BeginTransactionAsync();
+
                 var oldHazardousYesSampleKeys = await _db.IhmCheckpoints
                     .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
                     .Select(x => x.Sample_No)
@@ -773,6 +781,7 @@ namespace Survey_Certification_App.Controllers
                         area.SortOrder = areaDto.SortOrder;
                     }
                 }
+
                 await _db.SaveChangesAsync();
 
                 var existingCheckpoints = await _db.IhmCheckpoints
@@ -853,7 +862,8 @@ namespace Survey_Certification_App.Controllers
                                 SurveyJobId = jobId,
                                 Result = IhmCheckpointResult.Pending,
                                 Location = checkpointDto.Location,
-                                Remarks = checkpointDto.Remarks
+                                Remarks = checkpointDto.Remarks,
+                                LocationRemarks = checkpointDto.LocationRemarks
                             };
 
                             _db.IhmCheckpoints.Add(checkpoint);
@@ -877,6 +887,7 @@ namespace Survey_Certification_App.Controllers
                         AssignIfProvided(checkpointDto.VisualCheck, value => checkpoint.VisualCheck = value);
                         AssignIfProvided(checkpointDto.CheckResult, value => checkpoint.CheckResult = value);
                         AssignIfProvided(checkpointDto.Remarks, value => checkpoint.Remarks = value);
+                        AssignIfProvided(checkpointDto.LocationRemarks, value => checkpoint.LocationRemarks = value);
                         checkpoint.SourceRowNumber = checkpointDto.SourceRowNumber;
                     }
                 }
@@ -908,7 +919,9 @@ namespace Survey_Certification_App.Controllers
                     _db.IhmImageMarkers.RemoveRange(removedMarkers);
                     _db.IhmCheckpoints.RemoveRange(existingCheckpoints.Where(x => removedCheckpointIds.Contains(x.Id)));
                 }
+
                 await _db.SaveChangesAsync();
+
                 var reportInfo = await _db.IhmReportInfos
                     .FirstOrDefaultAsync(x => x.SurveyJobId == jobId);
 
@@ -934,6 +947,8 @@ namespace Survey_Certification_App.Controllers
                     _db.SurveyUploadedFiles.Add(previousChecklist);
                 }
 
+                await System.IO.File.WriteAllBytesAsync(filePath, excelBytes);
+
                 previousChecklist.OriginalFileName = file.FileName;
                 previousChecklist.StoredFileName = storedFileName;
                 previousChecklist.FilePath = relativeExcelPath;
@@ -945,6 +960,7 @@ namespace Survey_Certification_App.Controllers
                 await _db.SaveChangesAsync();
 
                 await transaction.CommitAsync();
+
                 var newHazardousYesSampleKeys = await _db.IhmCheckpoints
                     .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
                     .Select(x => x.Sample_No)
@@ -969,7 +985,7 @@ namespace Survey_Certification_App.Controllers
                 {
                     message = "IHM Excel imported and saved as job-wise table data.",
                     jobId,
-                    excelFile = $"/uploads/ihm-excel/{storedFileName}",
+                    excelFile = relativeExcelPath,
                     areaCount = parsed.Areas.Count,
                     checkpointCount = parsed.Areas.Sum(x => x.Checkpoints.Count)
                 });
@@ -3457,7 +3473,7 @@ namespace Survey_Certification_App.Controllers
         public string? VisualCheck { get; set; }
         public string? CheckResult { get; set; }
         public string? Remarks { get; set; }
-
+        public string? LocationRemarks { get; set; }
         public int? SourceRowNumber { get; set; }
     }
     public class GeneratedPlacementDto
