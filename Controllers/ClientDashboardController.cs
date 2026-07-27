@@ -43,6 +43,7 @@ namespace Survey_Certification_App.Controllers
 
             var jobs = await _db.SurveyJobs
                 .AsNoTracking()
+                .Include(x => x.IhmReportInfo)
                 .Where(x => jobIds.Contains(x.Id))
                 .ToListAsync();
 
@@ -323,6 +324,9 @@ namespace Survey_Certification_App.Controllers
                 ReportId = assignment.ReportId,
                 SurveyJobId = job.Id,
                 ReportType = assignment.ReportType,
+                RevisionNo = job.IhmReportInfo != null
+                        ? job.IhmReportInfo.RevisionNo
+                        : null,
                 Title = string.IsNullOrWhiteSpace(job.ProjectName) ? ToReportLabel(assignment.ReportType) : job.ProjectName,
                 VesselName = job.VesselName ?? job.SiteName,
                 Reference = job.JobNumber,
@@ -432,6 +436,7 @@ namespace Survey_Certification_App.Controllers
         public string? VesselName { get; set; }
         public string? Reference { get; set; }
         public string? Status { get; set; }
+        public string? RevisionNo { get; set; }
         public string? CreatedBy { get; set; }
         public DateTime AssignedAt { get; set; }
         public bool HasFile { get; set; }

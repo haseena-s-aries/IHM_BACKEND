@@ -67,6 +67,7 @@ namespace Survey_Certification_App.Data
         public DbSet<PdfDynamicEdit> PdfDynamicEdits { get; set; }
         public DbSet<IhmCompany> IhmCompanies { get; set; }
         public DbSet<ReportAssignment> ReportAssignments { get; set; }
+        public DbSet<ReportClientRemark> ReportClientRemarks { get; set; }
         protected override void OnModelCreating(ModelBuilder modelBuilder)
 
 

@@ -188,4 +188,15 @@ namespace Survey_Certification_App.Models.Survey
 
         public SurveyJob? SurveyJob { get; set; }
     }
+    public class ReportClientRemark
+    {
+        public int Id { get; set; }
+        public string ReportType { get; set; } = string.Empty;
+        public int ReportId { get; set; }
+        public int ClientUserId { get; set; }
+        public string Remark { get; set; } = string.Empty;
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+        public bool IsRead { get; set; }
+        public DateTime? ReadAtUtc { get; set; }
+    }
 }

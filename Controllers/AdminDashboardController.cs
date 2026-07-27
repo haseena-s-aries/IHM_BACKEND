@@ -582,7 +582,29 @@ namespace Survey_Certification_App.Controllers
 
             return report == null ? NotFound() : Ok(report);
         }
+        [HttpDelete("saved-reports/{type}/{id:int}")]
+        public IActionResult DeleteSavedReport(string type, int id)
+        {
+            var normalizedType = (type ?? string.Empty).Trim().ToLowerInvariant();
 
+            if (normalizedType != "ihm")
+                return BadRequest("Delete is currently available only for IHM reports.");
+
+            var pdfPath = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "wwwroot",
+                "reports",
+                "ihm",
+                id.ToString(),
+                "ihm-report.pdf");
+
+            if (!System.IO.File.Exists(pdfPath))
+                return NotFound("Saved report PDF not found.");
+
+            System.IO.File.Delete(pdfPath);
+
+            return Ok(new { message = "Report deleted successfully." });
+        }
         [HttpGet("saved-reports")]
         public async Task<IActionResult> GetSavedReports()
         {
@@ -658,11 +680,17 @@ namespace Survey_Certification_App.Controllers
     .FilterJobs(_db.SurveyJobs.AsNoTracking())
     .Where(x => x.ModuleType == SurveyModuleType.IhmSurvey);
 
-
+            
 
             var ihmJobs = await ihmJobsQuery
                 .Select(x => new { x.Id, x.VesselName, x.ProjectName, x.JobNumber, x.Status, x.CreatedByUserId, x.CreatedAt })
                 .ToListAsync();
+            var ihmJobIds = ihmJobs.Select(x => x.Id).ToList();
+
+            var ihmReportInfoByJobId = await _db.IhmReportInfos
+                .AsNoTracking()
+                .Where(x => ihmJobIds.Contains(x.SurveyJobId))
+                .ToDictionaryAsync(x => x.SurveyJobId);
 
             var createdUserIds = ihmJobs
                 .Select(x => x.CreatedByUserId)
@@ -691,6 +719,9 @@ namespace Survey_Certification_App.Controllers
                     VesselName = x.Job.VesselName,
                     Reference = x.Job.JobNumber,
                     Status = x.Job.Status.ToString(),
+                    RevisionNo = ihmReportInfoByJobId.TryGetValue(x.Job.Id, out var info)
+                        ? info.RevisionNo
+                        : null,
                     CreatedByUserId = x.Job.CreatedByUserId,
                     CreatedBy = usersById.TryGetValue(x.Job.CreatedByUserId, out var creator)
                         ? creator
@@ -876,6 +907,7 @@ namespace Survey_Certification_App.Controllers
             public string? VesselName { get; set; }
             public string? Reference { get; set; }
             public string? Status { get; set; }
+            public string? RevisionNo { get; set; }
             public string? CreatedBy { get; set; }
             public int? CreatedByUserId { get; set; }
             public int? ProjectId { get; set; }
