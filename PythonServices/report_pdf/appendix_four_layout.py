@@ -192,7 +192,29 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
     print("Appendix 4 rotation:", page.rotation)
     if page.rotation:
         page.transfer_rotation_to_content()
+    
+    if not map_image.exists():
+        generated_dir = (
+            project_root
+            / "wwwroot"
+            / "reports"
+            / "ihm"
+            / str(job_id)
+            / "generated-images"
+        )
 
+        latest_generated = sorted(
+            generated_dir.glob("appendix4-ga-marker-map-*.png"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True
+        ) if generated_dir.exists() else []
+
+        if latest_generated:
+            map_image = latest_generated[0]
+            print(
+                f"Using latest generated Appendix4 marked image fallback path={map_image}",
+                file=sys.stderr
+            )
     image_exists = map_image.exists()
 
     page_width = float(page.mediabox.width)
