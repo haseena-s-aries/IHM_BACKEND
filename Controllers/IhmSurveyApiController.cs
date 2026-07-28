@@ -146,7 +146,8 @@ namespace Survey_Certification_App.Controllers
                 Remarks = request.Remarks,
 
                 SourceRowNumber = request.SourceRowNumber,
-                Result = IhmCheckpointResult.Pending
+                Result = IhmCheckpointResult.Pending,
+                AuditStatus = request.AuditStatus ?? IhmCheckpointAuditStatus.Pending
             };
 
             _db.IhmCheckpoints.Add(checkpoint);
@@ -1266,6 +1267,9 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("jobs/{jobId:int}/areas-with-checkpoints")]
         public async Task<IActionResult> GetAreasWithCheckpoints(int jobId)
         {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return Forbid();
+
             var areas = await _db.IhmAreas
                 .Where(x => x.SurveyJobId == jobId)
                 .OrderBy(x => x.SortOrder)
@@ -1310,6 +1314,7 @@ namespace Survey_Certification_App.Controllers
                             cp.CheckResult,
 
                             Result = cp.Result.ToString(),
+                            AuditStatus = cp.AuditStatus.ToString(),
                             cp.Remarks,
                             cp.IsPchm,
                             cp.LocationRemarks,
@@ -1354,6 +1359,8 @@ namespace Survey_Certification_App.Controllers
             checkpoint.CheckResult = request.CheckResult;
             if (request.Result.HasValue)
                 checkpoint.Result = request.Result.Value;
+            if (request.AuditStatus.HasValue)
+                checkpoint.AuditStatus = request.AuditStatus.Value;
             checkpoint.Remarks = request.Remarks;
             checkpoint.LocationRemarks = request.LocationRemarks;
             checkpoint.UpdatedByUserId = request.UpdatedByUserId ?? GetCurrentUserId();
@@ -1448,6 +1455,9 @@ namespace Survey_Certification_App.Controllers
                  IFormFile file,
                  [FromForm] int? uploadedByUserId)
         {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return Forbid();
+
             var area = await _db.IhmAreas
                 .FirstOrDefaultAsync(x => x.Id == areaId && x.SurveyJobId == jobId);
 
@@ -1605,6 +1615,9 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("jobs/{jobId:int}/layout-attachments")]
         public async Task<IActionResult> GetLayoutAttachments(int jobId)
         {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return Forbid();
+
             var photos = await _db.IhmSamplingPhotos
                 .Where(x => x.SurveyJobId == jobId &&
                             x.IhmCheckpointId == null &&
@@ -1623,6 +1636,76 @@ namespace Survey_Certification_App.Controllers
                 });
 
             return Ok(latest);
+        }
+
+        [HttpGet("jobs/{jobId:int}/layout-options")]
+        public async Task<IActionResult> GetLayoutOptions(int jobId)
+        {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return Forbid();
+
+            var areas = await _db.IhmAreas
+                .AsNoTracking()
+                .Where(x =>
+                    x.SurveyJobId == jobId &&
+                    x.AreaName != null &&
+                    x.AreaName.Trim() != "")
+                .OrderBy(x => x.SortOrder)
+                .ThenBy(x => x.Id)
+                .Select(x => new
+                {
+                    x.Id,
+                    AreaName = x.AreaName.Trim()
+                })
+                .ToListAsync();
+
+            var photos = await _db.IhmSamplingPhotos
+                .AsNoTracking()
+                .Where(x =>
+                    x.SurveyJobId == jobId &&
+                    x.IhmCheckpointId == null &&
+                    (x.IhmAreaId != null || x.Caption == "Full GA layout"))
+                .OrderByDescending(x => x.UploadedAt)
+                .ToListAsync();
+
+            var attachmentMap = photos
+                .GroupBy(x => x.IhmAreaId?.ToString() ?? "common")
+                .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
+
+            attachmentMap.TryGetValue("common", out var commonAttachment);
+
+            var uniqueAreas = areas
+                .GroupBy(x => x.AreaName, StringComparer.OrdinalIgnoreCase)
+                .Select(x => x.First())
+                .Select(area =>
+                {
+                    attachmentMap.TryGetValue(area.Id.ToString(), out var attachment);
+                    return new
+                    {
+                        id = area.Id,
+                        value = $"area:{area.Id}",
+                        label = area.AreaName,
+                        originalFileName = attachment?.OriginalFileName,
+                        filePath = attachment == null
+                            ? null
+                            : $"{Request.Scheme}://{Request.Host}{attachment.FilePath}"
+                    };
+                })
+                .ToList();
+
+            return Ok(new
+            {
+                commonLayout = new
+                {
+                    value = "common",
+                    label = "Common Layout - fallback for every location",
+                    originalFileName = commonAttachment?.OriginalFileName,
+                    filePath = commonAttachment == null
+                        ? null
+                        : $"{Request.Scheme}://{Request.Host}{commonAttachment.FilePath}"
+                },
+                areas = uniqueAreas
+            });
         }
 
 
@@ -3076,6 +3159,7 @@ namespace Survey_Certification_App.Controllers
             public string? VisualCheck { get; set; }
             public string? CheckResult { get; set; }
             public IhmCheckpointResult? Result { get; set; }
+            public IhmCheckpointAuditStatus? AuditStatus { get; set; }
             public bool IsPchm { get; set; }
             public string? Remarks { get; set; }
             public string? LocationRemarks { get; set; }
@@ -3128,6 +3212,7 @@ namespace Survey_Certification_App.Controllers
                 VisualCheck = request.VisualCheck,
                 CheckResult = request.CheckResult,
                 Result = request.Result ?? IhmCheckpointResult.Pending,
+                AuditStatus = request.AuditStatus ?? IhmCheckpointAuditStatus.Pending,
                 IsPchm = request.IsPchm,
                 Remarks = request.Remarks,
                 LocationRemarks = request.LocationRemarks
@@ -3160,6 +3245,8 @@ namespace Survey_Certification_App.Controllers
             checkpoint.CheckResult = request.CheckResult;
             if (request.Result.HasValue)
                 checkpoint.Result = request.Result.Value;
+            if (request.AuditStatus.HasValue)
+                checkpoint.AuditStatus = request.AuditStatus.Value;
             checkpoint.Remarks = request.Remarks;
             checkpoint.LocationRemarks = request.LocationRemarks;
             checkpoint.UpdatedByUserId = request.UpdatedByUserId;
@@ -3228,6 +3315,7 @@ namespace Survey_Certification_App.Controllers
                 CheckResult = item.CheckResult,
 
                 Result = item.Result.ToString(),
+                AuditStatus = item.AuditStatus.ToString(),
                 Remarks = item.Remarks,
                 SourceRowNumber = item.SourceRowNumber
             };
@@ -3306,6 +3394,7 @@ namespace Survey_Certification_App.Controllers
         public string? VisualCheck { get; set; }
         public string? CheckResult { get; set; }
         public string? Remarks { get; set; }
+        public IhmCheckpointAuditStatus? AuditStatus { get; set; }
 
         public int? SourceRowNumber { get; set; }
     }
@@ -3371,6 +3460,7 @@ namespace Survey_Certification_App.Controllers
         public string? Table_A_B { get; set; }
         public string? HazardousMaterial { get; set; }
         public string Result { get; set; } = string.Empty;
+        public string AuditStatus { get; set; } = "Pending";
 
         public string? TableType { get; set; }
         public string? Location { get; set; }

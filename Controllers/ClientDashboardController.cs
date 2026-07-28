@@ -344,7 +344,7 @@ namespace Survey_Certification_App.Controllers
         }
 
         private static bool IsCheckpointCompleted(IhmCheckpoint checkpoint) =>
-            checkpoint.Result != IhmCheckpointResult.Pending;
+            checkpoint.AuditStatus == IhmCheckpointAuditStatus.Done;
 
         private static string CalculateStatus(DateTime? surveyDate, int completedItems, int totalItems)
         {

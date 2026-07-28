@@ -20,6 +20,13 @@ namespace Survey_Certification_App.Models.Survey
         Conflict = 5
     }
 
+    public enum IhmCheckpointAuditStatus
+    {
+        Pending = 1,
+        InProgress = 2,
+        Done = 3
+    }
+
     public class IhmArea
     {
         public int Id { get; set; }
@@ -63,6 +70,9 @@ namespace Survey_Certification_App.Models.Survey
         public string? HazardousMaterial { get; set; }
 
         public IhmCheckpointResult Result { get; set; } = IhmCheckpointResult.Pending;
+
+        public IhmCheckpointAuditStatus AuditStatus { get; set; } =
+            IhmCheckpointAuditStatus.Pending;
 
         [MaxLength(1000)]
         public string? Remarks { get; set; }

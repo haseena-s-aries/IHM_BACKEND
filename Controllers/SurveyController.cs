@@ -1058,7 +1058,7 @@ namespace Survey_Certification_App.Controllers
                 {
                     JobId = group.Key,
                     Total = group.Count(),
-                    Audited = group.Count(x => x.Result != IhmCheckpointResult.Pending)
+                    Audited = group.Count(x => x.AuditStatus == IhmCheckpointAuditStatus.Done)
                 })
                 .ToListAsync();
 
@@ -1445,7 +1445,7 @@ namespace Survey_Certification_App.Controllers
             var completedFromCheckpoints = await _db.IhmCheckpoints
                 .Where(x =>
                     ihmJobIds.Contains(x.SurveyJobId) &&
-                    x.Result != IhmCheckpointResult.Pending)
+                    x.AuditStatus == IhmCheckpointAuditStatus.Done)
                 .Select(x => new
                 {
                     JobId = x.SurveyJobId,

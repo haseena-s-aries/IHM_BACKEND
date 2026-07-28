@@ -26,6 +26,7 @@ namespace Survey_Certification_App.Controllers
         private readonly SignInManager<User> _signInManager;
         private readonly IWebHostEnvironment _env;
         private readonly AccessScopeService _access;
+        private readonly IConfiguration _config;
 
         public UserController(
             ApplicationDbContext db,
@@ -39,13 +40,14 @@ namespace Survey_Certification_App.Controllers
             _emailSettings = config.GetSection("EmailSettings").Get<EmailSettings>();
             _env = env;
             _access = access;
+            _config = config;
         }
 
         private string GenerateJwtToken(User user)
         {
-            var key = "THIS_SHOULD_BE_A_LONG_RANDOM_SECRET_KEY";
-            var issuer = "https://auth.mycompany.com";
-            var audience = "my-apps";
+            var key = _config["Jwt:Key"] ?? "THIS_SHOULD_BE_A_LONG_RANDOM_SECRET_KEY";
+            var issuer = _config["Jwt:Issuer"] ?? "https://auth.mycompany.com";
+            var audience = _config["Jwt:Audience"] ?? "my-apps";
             var effectiveRole = !string.IsNullOrWhiteSpace(user.RoleName)
                 ? user.RoleName.Trim()
                 : user.Role?.Trim() ?? "";
@@ -205,6 +207,14 @@ namespace Survey_Certification_App.Controllers
                     roleName = effectiveRole
                 }
             });
+        }
+
+
+        [Authorize]
+        [HttpPost("logout")]
+        public IActionResult Logout()
+        {
+            return Ok(new { message = "Logged out successfully." });
         }
 
 

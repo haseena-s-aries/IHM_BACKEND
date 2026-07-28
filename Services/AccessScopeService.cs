@@ -124,31 +124,17 @@ namespace Survey_Certification_App.Services
                         map.VesselId == job.VesselId.Value));
             }
 
-            if (IsSurveyor && ProjectId.HasValue && UserId.HasValue)
+            if (IsSurveyor && UserId.HasValue)
             {
                 return query.Where(job =>
-                    job.ProjectId == ProjectId.Value &&
-                    (
-                        job.CreatedByUserId == UserId.Value ||
-                        job.AssignedUserId == UserId.Value ||
-                        job.Assignments.Any(a =>
-                            a.SurveyorUserId == UserId.Value &&
-                            a.Status != SurveyAssignmentStatus.Returned)
-                    ));
+                    job.AssignedUserId == UserId.Value ||
+                    job.Assignments.Any(a =>
+                        a.SurveyorUserId == UserId.Value &&
+                        a.Status != SurveyAssignmentStatus.Returned));
             }
 
-            if (IsManager && UserId.HasValue)
-            {
-                var managedProjectIds = ManagedProjectIdQuery();
-                return query.Where(job =>
-                    job.ProjectId.HasValue &&
-                    managedProjectIds.Contains(job.ProjectId.Value) &&
-                    (
-                        job.CreatedByUserId == UserId.Value ||
-                        job.AssignedManagerId == UserId.Value ||
-                        job.AssignedUserId == UserId.Value
-                    ));
-            }
+            if (IsManager)
+                return query;
 
             if (ProjectId.HasValue && UserId.HasValue)
             {

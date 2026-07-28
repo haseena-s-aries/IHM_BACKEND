@@ -179,6 +179,11 @@ namespace Survey_Certification_App.Data
                .Property(x => x.Result)
                .HasConversion<string>();
 
+            modelBuilder.Entity<IhmCheckpoint>()
+               .Property(x => x.AuditStatus)
+               .HasConversion<string>()
+               .HasMaxLength(30);
+
             modelBuilder.Entity<IhmArea>()
                .HasOne(x => x.SurveyJob)
                .WithMany()

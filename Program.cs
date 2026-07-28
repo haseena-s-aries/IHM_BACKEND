@@ -59,9 +59,9 @@ builder.Services.AddControllers()
 // ------------------------------------------------------
 // 2) JWT configuration  (MUST MATCH CENTRAL AUTH API)
 // ------------------------------------------------------
-var jwtKey = "THIS_SHOULD_BE_A_LONG_RANDOM_SECRET_KEY"; // same as CentralAuth
-var jwtIssuer = "https://auth.mycompany.com";
-var jwtAudience = "my-apps";
+var jwtKey = builder.Configuration["Jwt:Key"] ?? "THIS_SHOULD_BE_A_LONG_RANDOM_SECRET_KEY"; // same as CentralAuth
+var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "https://auth.mycompany.com";
+var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "my-apps";
 
 // Optional: bind JwtSettings if you need it somewhere else
 builder.Services.Configure<JwtSettings>(
