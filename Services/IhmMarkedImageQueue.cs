@@ -26,6 +26,7 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
     private readonly ILogger<IhmMarkedImageQueue> _logger;
     private readonly ConcurrentQueue<IhmMarkedImageQueueItem> _queue = new();
     private readonly ConcurrentDictionary<string, byte> _running = new();
+    private readonly ConcurrentDictionary<string, IhmMarkedImageQueueItem> _rerunAfterRunning = new();
     private readonly SemaphoreSlim _signal = new(0);
 
     public IhmMarkedImageQueue(
@@ -42,8 +43,10 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
 
         if (_running.ContainsKey(key))
         {
+            _rerunAfterRunning[key] = new IhmMarkedImageQueueItem(jobId, sectionType, true);
+
             _logger.LogInformation(
-                "Marked image generation already queued/running. jobId={JobId} section={Section}",
+                "Marked image generation already running. Queued rerun. jobId={JobId} section={Section}",
                 jobId,
                 sectionType
             );
@@ -97,6 +100,13 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
             finally
             {
                 _running.TryRemove(key, out _);
+
+                if (_rerunAfterRunning.TryRemove(key, out var rerunItem))
+                {
+                    _running.TryAdd(key, 0);
+                    _queue.Enqueue(rerunItem);
+                    _signal.Release();
+                }
             }
         }
     }
@@ -578,6 +588,7 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
             .Select(x => new
             {
                 x.Id,
+                x.IhmAreaId,
                 x.Sample_No,
                 x.EquipmentName,
                 x.Location,
@@ -589,7 +600,21 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
                 x.Remarks
             })
             .ToListAsync(cancellationToken);
-
+                var areaLayouts = await db.IhmSamplingPhotos
+            .Where(x => x.SurveyJobId == jobId &&
+                        x.IhmAreaId != null &&
+                        x.IhmCheckpointId == null)
+            .OrderBy(x => x.IhmAreaId)
+            .ThenByDescending(x => x.UploadedAt)
+            .Select(x => new
+            {
+                x.Id,
+                x.IhmAreaId,
+                AreaName = x.IhmArea != null ? x.IhmArea.AreaName : null,
+                x.OriginalFileName,
+                x.FilePath
+            })
+            .ToListAsync(cancellationToken);
         var markers = await db.IhmImageMarkers
             .Where(x => x.SurveyJobId == jobId)
             .OrderBy(x => x.IhmAreaId)
@@ -614,6 +639,7 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         {
             Job = job,
             EquipmentAndMachinery = equipmentAndMachinery,
+            AreaLayouts = areaLayouts,
             Markers = markers
         };
 

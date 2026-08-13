@@ -222,15 +222,22 @@ def _write_cache_manifest(cache_dir, cache_key, payload):
 def make_hazard_pdf_ready_image(image_path, target_width_pt, target_height_pt, label):
     image_path = Path(image_path)
 
-    target_w_px = max(1, int(float(target_width_pt) / 72 * 150))
-    target_h_px = max(1, int(float(target_height_pt) / 72 * 150))
+    target_w_px = max(1, int(float(target_width_pt) / 72 * 450))
+    target_h_px = max(1, int(float(target_height_pt) / 72 * 450))
 
-    ready_path = image_path.parent / f"{image_path.stem}-pdf-ready.tmp.jpg"
+    ready_path = image_path.parent / f"{image_path.stem}-pdf-ready.tmp.png"
 
     with Image.open(image_path) as img:
         img = ImageOps.exif_transpose(img).convert("RGB")
-        img.thumbnail((target_w_px, target_h_px), Image.Resampling.LANCZOS)
-        img.save(ready_path, "JPEG", quality=92, optimize=True)
+
+        if img.width < target_w_px or img.height < target_h_px:
+            scale = min(target_w_px / img.width, target_h_px / img.height)
+            new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        else:
+            img.thumbnail((target_w_px, target_h_px), Image.Resampling.LANCZOS)
+
+        img.save(ready_path, "PNG", dpi=(450, 450))
 
     return ready_path
 
@@ -1208,7 +1215,41 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas_img.save(output_path, format="PNG")
     return output_path
+def row_area_id(row):
+    value = first_value(row, "ihmAreaId", "IhmAreaId", "areaId", "AreaId")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
+
+def layout_area_id(layout):
+    value = first_value(layout, "ihmAreaId", "IhmAreaId", "areaId", "AreaId")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def layout_file_path(layout):
+    return first_value(layout, "filePath", "FilePath")
+
+
+def latest_area_layout_map(data):
+    layouts = data.get("areaLayouts") or data.get("AreaLayouts") or []
+    result = {}
+
+    for layout in layouts:
+        area_id = layout_area_id(layout)
+        path = layout_file_path(layout)
+        if area_id is None or not path:
+            continue
+
+        # Payload is already ordered latest-first per area after backend change,
+        # so keep the first layout for each area.
+        result.setdefault(area_id, layout)
+
+    return result
 def build_i2_hazard_layout_images(data, output_dir=None):
     use_fixed_output_dir = output_dir is not None
     equipment_rows = get_rows(
@@ -1233,6 +1274,7 @@ def build_i2_hazard_layout_images(data, output_dir=None):
 
     grouped_by_image = {}
     i2_rows_by_sample_no = {}
+    area_layout_by_id = latest_area_layout_map(data)
 
     for row in equipment_rows:
         sample_no = normalize_sample_label(equipment_sample_no(row))
@@ -1240,10 +1282,20 @@ def build_i2_hazard_layout_images(data, output_dir=None):
             continue
         i2_rows_by_sample_no[sample_no] = row
         row_markers = markers_by_label.get(sample_no) or []
-        if not row_markers:
-            continue
-
         label = hazard_marker_label(row)
+
+        if not row_markers:
+            area_id = row_area_id(row)
+            layout = area_layout_by_id.get(area_id)
+            layout_path = layout_file_path(layout) if layout else None
+            normalized_layout = normalize_web_path(layout_path)
+
+            if normalized_layout:
+                grouped_by_image.setdefault(normalized_layout, {
+                    "source": layout_path,
+                    "items": []
+                })
+            continue
 
         for marker in row_markers:
             image_path = marker_image_path(marker)

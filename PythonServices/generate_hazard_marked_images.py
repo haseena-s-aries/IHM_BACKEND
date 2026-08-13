@@ -23,7 +23,7 @@ def main():
 
     if not images:
         raise RuntimeError(
-            "No hazardous I-2 marked images were generated. Add or auto-map I-2 marker positions before generating the PDF."
+            "No hazardous I-2 layout images were generated. Upload an area layout for the hazardous checkpoint area before generating the PDF."
         )
 
     manifest_json.write_text(

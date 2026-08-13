@@ -253,7 +253,7 @@ namespace Survey_Certification_App.Controllers
                     await _db.SaveChangesAsync();
                 }
             }
-            QueueMarkedImages(request.SurveyJobId);
+            QueueMarkedImages(request.SurveyJobId, force: true);
             return Ok(ToMarkerDto(marker));
         }
         [HttpPost("jobs/{jobId:int}/layouts/auto-map-markers")]
@@ -1740,7 +1740,7 @@ namespace Survey_Certification_App.Controllers
 
             _db.IhmImageMarkers.RemoveRange(markersToDelete);
             await _db.SaveChangesAsync();
-            QueueMarkedImages(marker.SurveyJobId);
+            QueueMarkedImages(marker.SurveyJobId, force: true);
 
             return Ok(new
             {

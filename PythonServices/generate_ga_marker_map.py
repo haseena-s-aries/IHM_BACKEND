@@ -769,6 +769,13 @@ def save_marked_layout(source_path, markers, output_path, outer_pad=120):
     base_image = Image.open(source_path).convert("RGB")
     image_width, image_height = base_image.size
 
+    min_width = 2400
+    if image_width < min_width:
+        scale = min_width / image_width
+        image_width = int(image_width * scale)
+        image_height = int(image_height * scale)
+        base_image = base_image.resize((image_width, image_height), Image.Resampling.LANCZOS)
+
     marked_image = Image.new(
         "RGB",
         (image_width + outer_pad * 2, image_height + outer_pad * 2),
@@ -793,7 +800,7 @@ def save_marked_layout(source_path, markers, output_path, outer_pad=120):
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    marked_image.save(output_path)
+    marked_image.save(output_path, dpi=(300, 300), quality=95)
 
 
 def main():
@@ -976,7 +983,7 @@ def main():
     )
 
     output_image.parent.mkdir(parents=True, exist_ok=True)
-    ga_img.save(output_image)
+    ga_img.save(output_image, dpi=(300, 300), quality=95)
 
     manifest_path = output_image.parent / "appendix4-layout-pages.json"
     manifest_path.write_text(

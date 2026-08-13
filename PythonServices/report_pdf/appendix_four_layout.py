@@ -56,15 +56,22 @@ def _cache_image(source_path, data, label):
 def make_pdf_ready_image(image_path, target_width_pt, target_height_pt, label):
     image_path = Path(image_path)
 
-    target_w_px = max(1, int(float(target_width_pt) / 72 * 150))
-    target_h_px = max(1, int(float(target_height_pt) / 72 * 150))
+    target_w_px = max(1, int(float(target_width_pt) / 72 * 450))
+    target_h_px = max(1, int(float(target_height_pt) / 72 * 450))
 
-    ready_path = image_path.parent / f"{image_path.stem}-pdf-ready.tmp.jpg"
+    ready_path = image_path.parent / f"{image_path.stem}-pdf-ready.tmp.png"
 
     with Image.open(image_path) as img:
         img = ImageOps.exif_transpose(img).convert("RGB")
-        img.thumbnail((target_w_px, target_h_px), Image.Resampling.LANCZOS)
-        img.save(ready_path, "JPEG", quality=92, optimize=True)
+
+        if img.width < target_w_px or img.height < target_h_px:
+            scale = min(target_w_px / img.width, target_h_px / img.height)
+            new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        else:
+            img.thumbnail((target_w_px, target_h_px), Image.Resampling.LANCZOS)
+
+        img.save(ready_path, "PNG", dpi=(450, 450))
 
     return ready_path
 def make_area_layout_page(image_path, data=None):
@@ -240,10 +247,10 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
     image_height = image_top - image_y
     print(f"Appendix4 selected main map image={map_image} exists={image_exists}", file=sys.stderr)
     if not image_exists or map_image.stat().st_size <= 0:
-        print("Appendix 4 main map image missing. Skipping Appendix 4 layout pages.", file=sys.stderr)
-        return []
+        print("Appendix 4 main map image missing. Continuing with area layout pages if available.", file=sys.stderr)
+        page = None
 
-    if image_exists:
+    if image_exists and page is not None:
         image_started = time.perf_counter()
 
         pdf_ready_map = make_pdf_ready_image(
@@ -273,7 +280,7 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
     overlay_page = PdfReader(packet).pages[0]
     page.merge_page(overlay_page)
 
-    pages = [page]
+    pages = [page] if page is not None else []
 
     report_folder = (
         project_root
