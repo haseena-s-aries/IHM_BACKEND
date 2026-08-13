@@ -1,0 +1,3 @@
+2026-07-20 17:38:17 | MAIN START | FILE=E:\ARIES_PROJECTS\AurasApp_Apis\AurasApp_Apis\AurasApp_Apis\PythonServices\detect_layout_marker_regions.py | PYTHON=C:\Python314\python.exe | CWD=E:\ARIES_PROJECTS\AurasApp_Apis\AurasApp_Apis\AurasApp_Apis | ARGS=['E:\\ARIES_PROJECTS\\AurasApp_Apis\\AurasApp_Apis\\AurasApp_Apis\\PythonServices\\detect_layout_marker_regions.py', 'E:\\ARIES_PROJECTS\\AurasApp_Apis\\AurasApp_Apis\\AurasApp_Apis\\wwwroot\\uploads\\ihm-ga-layouts\\17\\4e1149ca-ceda-41d1-a5a0-66999bddeb07.png']
+2026-07-20 17:38:17 | IMAGE_PATH=E:\ARIES_PROJECTS\AurasApp_Apis\AurasApp_Apis\AurasApp_Apis\wwwroot\uploads\ihm-ga-layouts\17\4e1149ca-ceda-41d1-a5a0-66999bddeb07.png | EXISTS=True
+2026-07-20 17:38:28 | MAIN END | REGIONS=0

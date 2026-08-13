@@ -1501,7 +1501,18 @@ namespace Survey_Certification_App.Controllers
 
                 markerFileName = $"{baseName}.jpg";
                 markerPhysicalPath = Path.Combine(uploadFolder, markerFileName);
-                await ConvertPdfFirstPageToImageAsync(physicalPath, markerPhysicalPath);
+                try
+                {
+                    await ConvertPdfFirstPageToImageAsync(physicalPath, markerPhysicalPath);
+                }
+                catch (Exception ex)
+                {
+                    return BadRequest(new
+                    {
+                        message = "PDF uploaded, but first page image conversion failed.",
+                        detail = ex.Message
+                    });
+                }
             }
             else
             {
@@ -1785,7 +1796,18 @@ namespace Survey_Certification_App.Controllers
             {
                 markerFileName = $"{baseName}.jpg";
                 var markerPhysicalPath = Path.Combine(uploadFolder, markerFileName);
-                await ConvertPdfFirstPageToImageAsync(physicalPath, markerPhysicalPath);
+                try
+                {
+                    await ConvertPdfFirstPageToImageAsync(physicalPath, markerPhysicalPath);
+                }
+                catch (Exception ex)
+                {
+                    return BadRequest(new
+                    {
+                        message = "PDF uploaded, but first page image conversion failed.",
+                        detail = ex.Message
+                    });
+                }
             }
 
             var filePath = $"/uploads/ihm-ga-layouts/{jobId}/{markerFileName}";
