@@ -171,19 +171,27 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         var sw = Stopwatch.StartNew();
 
         var gaLayout = await db.IhmSamplingPhotos
-            .Where(x => x.SurveyJobId == item.JobId &&
-                        x.IhmAreaId == null &&
-                        x.IhmCheckpointId == null &&
-                        x.Caption == "Full GA layout")
-            .OrderByDescending(x => x.UploadedAt)
-            .FirstOrDefaultAsync(cancellationToken);
+    .Where(x => x.SurveyJobId == item.JobId &&
+                x.IhmAreaId == null &&
+                x.IhmCheckpointId == null &&
+                x.Caption == "Full GA layout")
+    .OrderByDescending(x => x.UploadedAt)
+    .FirstOrDefaultAsync(cancellationToken);
 
         if (gaLayout == null)
         {
-            _logger.LogInformation(
-                "Marked image missing source GA layout. jobId={JobId}",
-                item.JobId
-            );
+            gaLayout = await db.IhmSamplingPhotos
+                .Where(x => x.SurveyJobId == item.JobId &&
+                            x.IhmAreaId != null &&
+                            x.IhmCheckpointId == null)
+                .OrderBy(x => x.IhmAreaId)
+                .ThenByDescending(x => x.UploadedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
+
+        if (gaLayout == null)
+        {
+            _logger.LogInformation("No common or area layout uploaded. Skipping Appendix 4 marked image generation. jobId={JobId}", item.JobId);
             return;
         }
 
@@ -346,13 +354,25 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         CancellationToken cancellationToken)
     {
         var gaLayout = await db.IhmSamplingPhotos
-            .Where(x => x.SurveyJobId == jobId &&
-                        x.IhmAreaId == null &&
-                        x.IhmCheckpointId == null &&
-                        x.Caption == "Full GA layout")
-            .OrderByDescending(x => x.UploadedAt)
-            .Select(x => x.FilePath)
-            .FirstOrDefaultAsync(cancellationToken);
+    .Where(x => x.SurveyJobId == jobId &&
+                x.IhmAreaId == null &&
+                x.IhmCheckpointId == null &&
+                x.Caption == "Full GA layout")
+    .OrderByDescending(x => x.UploadedAt)
+    .Select(x => x.FilePath)
+    .FirstOrDefaultAsync(cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(gaLayout))
+        {
+            gaLayout = await db.IhmSamplingPhotos
+                .Where(x => x.SurveyJobId == jobId &&
+                            x.IhmAreaId != null &&
+                            x.IhmCheckpointId == null)
+                .OrderBy(x => x.IhmAreaId)
+                .ThenByDescending(x => x.UploadedAt)
+                .Select(x => x.FilePath)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
 
         var areaLayouts = await db.IhmSamplingPhotos
             .Where(x => x.SurveyJobId == jobId &&
@@ -581,7 +601,14 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
             .Where(x => x.Id == jobId)
             .Select(x => new { x.Id })
             .FirstOrDefaultAsync(cancellationToken);
-
+        var gaLayout = await db.IhmSamplingPhotos
+    .Where(x => x.SurveyJobId == jobId &&
+                x.IhmAreaId == null &&
+                x.IhmCheckpointId == null &&
+                x.Caption == "Full GA layout")
+    .OrderByDescending(x => x.UploadedAt)
+    .Select(x => x.FilePath)
+    .FirstOrDefaultAsync(cancellationToken);
         var equipmentAndMachinery = await db.IhmCheckpoints
             .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
             .OrderBy(x => x.Id)
@@ -638,6 +665,7 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         var payload = new
         {
             Job = job,
+            GaLayout = gaLayout,
             EquipmentAndMachinery = equipmentAndMachinery,
             AreaLayouts = areaLayouts,
             Markers = markers

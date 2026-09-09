@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+Image.MAX_IMAGE_PIXELS = None
 MIN_AUTO_MATCH_CONFIDENCE = 0.55
 
 
@@ -198,7 +199,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         return
 
     try:
-        font = ImageFont.truetype("arial.ttf", 20)
+        font = ImageFont.truetype("arialbd.ttf", 34)
     except OSError:
         font = ImageFont.load_default()
 
@@ -212,10 +213,10 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
 
     groups = group_markers(marker_points, tolerance=28)
 
-    label_h = 28
-    gap = 12
-    margin = 8
-    outside_gap = 20
+    label_h = 48
+    gap = 18
+    margin = 10
+    outside_gap = 28
     lane_gap = label_h + gap
     route_gap = 18
     collision_pad = 8
@@ -625,7 +626,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
     for group in ordered_groups:
         label = ", ".join(group["labels"])
         text_w, text_h = text_size(draw, label, font)
-        label_w = max(58, text_w + 16)
+        label_w = max(110, text_w + 28)
         side = marker_side(group)
 
         chosen_box = None
@@ -702,9 +703,9 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         label = item["label"]
         text_h = item["text_h"]
 
-        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=2)
+        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=4)
         draw.text(
-            (x1 + 8, y1 + max(2, (label_h - text_h) / 2 - 1)),
+            (x1 + 14, y1 + max(6, (label_h - text_h) / 2 - 2)),
             label,
             fill=blue,
             font=font,
@@ -769,6 +770,13 @@ def save_marked_layout(source_path, markers, output_path, outer_pad=120):
     base_image = Image.open(source_path).convert("RGB")
     image_width, image_height = base_image.size
 
+    max_side = 7000
+    if max(image_width, image_height) > max_side:
+        scale = max_side / max(image_width, image_height)
+        new_size = (max(1, int(image_width * scale)), max(1, int(image_height * scale)))
+        base_image = base_image.resize(new_size, Image.Resampling.LANCZOS)
+        image_width, image_height = base_image.size
+
     min_width = 2400
     if image_width < min_width:
         scale = min_width / image_width
@@ -828,6 +836,13 @@ def main():
     base_img = Image.open(ga_path).convert("RGB")
     ga_w, ga_h = base_img.size
 
+    max_side = 7000
+    if max(ga_w, ga_h) > max_side:
+        scale = max_side / max(ga_w, ga_h)
+        new_size = (max(1, int(ga_w * scale)), max(1, int(ga_h * scale)))
+        base_img = base_img.resize(new_size, Image.Resampling.LANCZOS)
+        ga_w, ga_h = base_img.size
+
     outer_pad = 180
 
     ga_img = Image.new(
@@ -844,6 +859,7 @@ def main():
     markers = data.get("markers") or []
     existing_placements = data.get("placements") or []
     layout_count_by_area = {}
+    ga_layout_web_path = normalized_web_path(data.get("gaLayout"))
     for layout in area_layouts:
         area_id = layout.get("ihmAreaId")
         if area_id is not None:
@@ -900,9 +916,15 @@ def main():
             continue
 
         area_id = int(area_id)
-        area_path = resolve_web_path(layout.get("filePath"))
+        area_file_path = layout.get("filePath")
+        area_path = resolve_web_path(area_file_path)
 
         if not area_path or not area_path.exists():
+            continue
+
+        # If common layout is missing, backend uses the first area layout as the
+        # Appendix 4 main map. Do not add that same area layout again as an extra page.
+        if ga_layout_web_path and normalized_web_path(area_file_path) == ga_layout_web_path:
             continue
 
         area_markers = markers_by_area.get(area_id, [])

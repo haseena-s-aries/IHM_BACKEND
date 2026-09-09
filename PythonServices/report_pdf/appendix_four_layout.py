@@ -277,8 +277,9 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
     c.save()
     packet.seek(0)
 
-    overlay_page = PdfReader(packet).pages[0]
-    page.merge_page(overlay_page)
+    if page is not None:
+        overlay_page = PdfReader(packet).pages[0]
+        page.merge_page(overlay_page)
 
     pages = [page] if page is not None else []
 
@@ -307,8 +308,11 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
 
     if not area_images:
         print("Pre-generated Appendix 4 area images missing. Skipping PDF-time fallback.", file=sys.stderr)
-
+    main_map_resolved = map_image.resolve() if map_image and map_image.exists() else None
     for area_image in area_images:
+        if main_map_resolved and area_image.resolve() == main_map_resolved:
+            print(f"Skipping duplicate Appendix 4 area image already used as main map: {area_image}", file=sys.stderr)
+            continue
         area_started = time.perf_counter()
         print(f"START Appendix 4 area image {area_image}", file=sys.stderr)
 

@@ -1286,7 +1286,15 @@ public class IhmReportInfoController : ControllerBase
                 });
             }
         }
-        await _db.SaveChangesAsync();
+        try
+        {
+            await _db.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict("Report data was updated at the same time. Please wait a few seconds and try again.");
+        }
+
         return Ok(existing);
     }
 

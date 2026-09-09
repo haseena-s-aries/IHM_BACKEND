@@ -725,10 +725,10 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     draw = ImageDraw.Draw(canvas_img)
 
     try:
-        font = ImageFont.truetype("arialbd.ttf", 18)
+        font = ImageFont.truetype("arialbd.ttf", 32)
     except OSError:
         try:
-            font = ImageFont.truetype("arial.ttf", 18)
+            font = ImageFont.truetype("arialbd.ttf", 32)
         except OSError:
             font = ImageFont.load_default()
 
@@ -1027,18 +1027,18 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         y = outer_pad + percent_to_unit(marker.get("yPercent") or marker.get("YPercent")) * image_h
 
         if is_existing_label:
-            max_label_w = 210
-            lines = wrap_pil_text(draw, label, font, max_label_w - 14)
-            line_h = 21
+            max_label_w = 360
+            lines = wrap_pil_text(draw, label, font, max_label_w - 28)
+            line_h = 38
 
             label_w = max(
                 90,
                 min(
                     max_label_w,
-                    max(draw.textbbox((0, 0), line, font=font)[2] for line in lines) + 14
+                    max(draw.textbbox((0, 0), line, font=font)[2] for line in lines) + 28
                 )
             )
-            label_h = max(label_h_base, len(lines) * line_h + 10)
+            label_h = max(label_h_base, len(lines) * line_h + 18)
 
             box_x = x - label_w / 2
             box_y = y - label_h / 2
@@ -1050,7 +1050,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
             # Do not redraw dot, leader line, or full label border.
             
             text_clear_pad_x = max(label_w / 2, 55)
-            text_clear_pad_y = max(label_h / 2, 18)
+            text_clear_pad_y = max(label_h / 2, 30)
 
             clear_x1 = max(layout_x, x - text_clear_pad_x)
             clear_y1 = max(layout_y, y - text_clear_pad_y)
@@ -1064,26 +1064,26 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
                 width=2,
             )
 
-            text_y = clear_y1 + 4
+            text_y = clear_y1 + 8
             for line in lines:
-                draw.text((clear_x1 + 5, text_y), line, fill=blue, font=font)
+                draw.text((clear_x1 + 10, text_y), line, fill=blue, font=font)
                 text_y += line_h
 
             used_boxes.append((clear_x1, clear_y1, clear_x2, clear_y2))
             continue
 
 
-        max_label_w = 210
-        lines = wrap_pil_text(draw, label, font, max_label_w - 14)
-        line_h = 18
+        max_label_w = 360
+        lines = wrap_pil_text(draw, label, font, max_label_w - 28)
+        line_h = 38
         label_w = max(
             90,
             min(
                 max_label_w,
-                max(draw.textbbox((0, 0), line, font=font)[2] for line in lines) + 14
+                max(draw.textbbox((0, 0), line, font=font)[2] for line in lines) + 28
             )
         )
-        label_h = max(label_h_base, len(lines) * line_h + 10)
+        label_h = max(label_h_base, len(lines) * line_h + 18)
 
         def make_candidate_box(candidate_side, lane=0):
             side_index = label_side_counts.get(candidate_side, 0)
@@ -1205,12 +1205,12 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
 
     for item in placements:
         x1, y1, x2, y2 = item["box"]
-        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=3)
+        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=4)
 
-        text_y = y1 + 6
+        text_y = y1 + 9
         for line in item["lines"]:
-            draw.text((x1 + 8, text_y), line, fill=blue, font=font)
-            text_y += 18
+            draw.text((x1 + 14, text_y), line, fill=blue, font=font)
+            text_y += 38
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas_img.save(output_path, format="PNG")
@@ -1275,8 +1275,13 @@ def build_i2_hazard_layout_images(data, output_dir=None):
     grouped_by_image = {}
     i2_rows_by_sample_no = {}
     area_layout_by_id = latest_area_layout_map(data)
+    hazard_area_ids = set()
 
     for row in equipment_rows:
+        area_id = row_area_id(row)
+        if area_id is not None:
+            hazard_area_ids.add(area_id)
+
         sample_no = normalize_sample_label(equipment_sample_no(row))
         if not sample_no:
             continue
@@ -1347,6 +1352,35 @@ def build_i2_hazard_layout_images(data, output_dir=None):
             "Missing I-2 marker positions: " + ", ".join(missing_sample_nos),
             file=sys.stderr
         )
+    if not grouped_by_image:
+        for area_id in sorted(hazard_area_ids):
+            layout = area_layout_by_id.get(area_id)
+            layout_path = layout_file_path(layout) if layout else None
+            normalized_layout = normalize_web_path(layout_path)
+
+            if normalized_layout:
+                grouped_by_image.setdefault(normalized_layout, {
+                    "source": layout_path,
+                    "items": []
+                })
+
+    if not grouped_by_image:
+        common_layout = get_ga_layout_source(data)
+
+        for area_id in sorted(hazard_area_ids):
+            layout = area_layout_by_id.get(area_id)
+            layout_path = layout_file_path(layout) if layout else None
+
+            if not layout_path:
+                layout_path = common_layout
+
+            normalized_layout = normalize_web_path(layout_path)
+
+            if normalized_layout:
+                grouped_by_image.setdefault(normalized_layout, {
+                    "source": layout_path,
+                    "items": []
+                })
 
     generated = []
     print(f"I-2 hazard layout image groups: {len(grouped_by_image)}", file=sys.stderr)

@@ -22,9 +22,12 @@ def main():
     images = [str(Path(image).resolve()) for image in images if Path(image).exists()]
 
     if not images:
-        raise RuntimeError(
-            "No hazardous I-2 layout images were generated. Upload an area layout for the hazardous checkpoint area before generating the PDF."
+        manifest_json.write_text(
+            json.dumps({"images": []}, indent=2),
+            encoding="utf-8"
         )
+        print(f"Generated empty hazardous manifest: {manifest_json} images=0")
+        return
 
     manifest_json.write_text(
         json.dumps({"images": images}, indent=2),

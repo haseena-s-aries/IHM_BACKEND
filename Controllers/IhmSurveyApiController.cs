@@ -2806,6 +2806,16 @@ namespace Survey_Certification_App.Controllers
 
                     var output = await outputTask;
                     var error = await errorTask;
+                    var logFolder = Path.Combine(outputFolder, "logs");
+                    Directory.CreateDirectory(logFolder);
+
+                    await System.IO.File.WriteAllTextAsync(
+                        Path.Combine(logFolder, $"ihm-report-python-{DateTime.UtcNow:yyyyMMdd-HHmmss}.stdout.log"),
+                        output ?? string.Empty);
+
+                    await System.IO.File.WriteAllTextAsync(
+                        Path.Combine(logFolder, $"ihm-report-python-{DateTime.UtcNow:yyyyMMdd-HHmmss}.stderr.log"),
+                        error ?? string.Empty);
 
                     if (process.ExitCode != 0)
                         throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? output : error);
