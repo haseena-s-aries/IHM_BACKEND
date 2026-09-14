@@ -3,6 +3,7 @@ import json
 import hashlib
 import sys
 import time
+from io import BytesIO
 from pathlib import Path
 from PIL import Image, ImageOps
 from pypdf import PdfReader
@@ -76,23 +77,26 @@ def make_pdf_ready_image(image_path, target_width_pt, target_height_pt, label):
     return ready_path
 def make_area_layout_page(image_path, data=None):
     data = data or {}
-    job = data.get("job") or {}
-    vessel = data.get("vessel") or {}
-    report = data.get("reportInfo") or {}
-
-    vessel_name = vessel.get("vesselName") or job.get("vesselName") or ""
-    company_name = report.get("companyName") or ""
-
     started = time.perf_counter()
+
     with Image.open(image_path) as img:
+        img = ImageOps.exif_transpose(img)
         img_width, img_height = img.size
 
-    is_wide = img_width > img_height
+    max_page_width = 1600
+    max_page_height = 1100
+    horizontal_margin = 45
+    header_footer_space = 150
 
-    
-    page_width = 840
-    page_height = 580
-    
+    scale = min(
+        (max_page_width - (horizontal_margin * 2)) / img_width,
+        (max_page_height - header_footer_space) / img_height,
+        1
+    )
+    draw_width = img_width * scale
+    draw_height = img_height * scale
+    page_width = max(840, min(max_page_width, draw_width + (horizontal_margin * 2)))
+    page_height = max(580, min(max_page_height, draw_height + header_footer_space))
 
     page = PageObject.create_blank_page(
         width=page_width,
@@ -102,34 +106,29 @@ def make_area_layout_page(image_path, data=None):
     packet = BytesIO()
     c = canvas.Canvas(packet, pagesize=(page_width, page_height))
 
+    report = data.get("reportInfo") or {}
+    vessel = data.get("vessel") or {}
+    job = data.get("job") or {}
     draw_common_header_footer(
         c,
-        vessel_name=vessel_name,
-        company_name=company_name,
-        page_no_text=""
+        vessel_name=vessel.get("vesselName") or job.get("vesselName"),
+        company_name=report.get("companyName"),
+        page_no_text="Page | "
     )
-
-    image_x = 45
-    image_y = 65
-    image_right = page_width - 45
-    image_top = page_height - 80
-
-    image_width = image_right - image_x
-    image_height = image_top - image_y
 
     pdf_ready_image = make_pdf_ready_image(
         image_path,
-        image_width,
-        image_height,
+        draw_width,
+        draw_height,
         "appendix4-area"
     )
 
     c.drawImage(
         ImageReader(str(pdf_ready_image)),
-        image_x,
-        image_y,
-        width=image_width,
-        height=image_height,
+        (page_width - draw_width) / 2,
+        75 + (page_height - 150 - draw_height) / 2,
+        width=draw_width,
+        height=draw_height,
         preserveAspectRatio=True,
         anchor="c",
         mask="auto",
@@ -193,13 +192,6 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
     if page_index >= len(reader.pages):
         return []
 
-    page = reader.pages[page_index]
-    print("Appendix 4 media box:", page.mediabox)
-    print("Appendix 4 crop box:", page.cropbox)
-    print("Appendix 4 rotation:", page.rotation)
-    if page.rotation:
-        page.transfer_rotation_to_content()
-    
     if not map_image.exists():
         generated_dir = (
             project_root
@@ -222,66 +214,7 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
                 f"Using latest generated Appendix4 marked image fallback path={map_image}",
                 file=sys.stderr
             )
-    image_exists = map_image.exists()
-
-    page_width = float(page.mediabox.width)
-    page_height = float(page.mediabox.height)
-
-    print("Appendix 4 page size:", page_width, page_height)
-    print("Appendix 4 rotation after fix:", page.rotation)
-
-    packet = BytesIO()
-    c = canvas.Canvas(packet, pagesize=(page_width, page_height))
-
-    c.setFillColorRGB(1, 1, 1)
-
-    c.rect(100, 480, 1660 - 100, 900 - 480, fill=1, stroke=0)
-    c.rect(100, 35, 1940 - 100, 540 - 35, fill=1, stroke=0)
-
-    image_x = 60
-    image_y = 40
-    image_right = 1660
-    image_top = 900
-
-    image_width = image_right - image_x
-    image_height = image_top - image_y
-    print(f"Appendix4 selected main map image={map_image} exists={image_exists}", file=sys.stderr)
-    if not image_exists or map_image.stat().st_size <= 0:
-        print("Appendix 4 main map image missing. Continuing with area layout pages if available.", file=sys.stderr)
-        page = None
-
-    if image_exists and page is not None:
-        image_started = time.perf_counter()
-
-        pdf_ready_map = make_pdf_ready_image(
-            map_image,
-            image_width,
-            image_height,
-            "appendix4-main-map"
-        )
-
-        c.drawImage(
-            ImageReader(str(pdf_ready_map)),
-            image_x,
-            image_y,
-            width=image_width,
-            height=image_height,
-            preserveAspectRatio=True,
-            anchor="c",
-            mask="auto",
-        )
-        print(
-            f"Appendix 4 main map draw elapsed_ms={int((time.perf_counter() - image_started) * 1000)} image={map_image}",
-            file=sys.stderr
-        )
-    c.save()
-    packet.seek(0)
-
-    if page is not None:
-        overlay_page = PdfReader(packet).pages[0]
-        page.merge_page(overlay_page)
-
-    pages = [page] if page is not None else []
+    pages = []
 
     report_folder = (
         project_root
@@ -299,7 +232,7 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             for item in manifest:
-                if item.get("kind") == "area" and item.get("fileName"):
+                if item.get("fileName"):
                     candidate = generated_folder / item["fileName"]
                     if candidate.exists():
                         area_images.append(candidate)
@@ -308,11 +241,7 @@ def make_appendix_four_location_plan_pages(page_number=1, job_id=None, data=None
 
     if not area_images:
         print("Pre-generated Appendix 4 area images missing. Skipping PDF-time fallback.", file=sys.stderr)
-    main_map_resolved = map_image.resolve() if map_image and map_image.exists() else None
     for area_image in area_images:
-        if main_map_resolved and area_image.resolve() == main_map_resolved:
-            print(f"Skipping duplicate Appendix 4 area image already used as main map: {area_image}", file=sys.stderr)
-            continue
         area_started = time.perf_counter()
         print(f"START Appendix 4 area image {area_image}", file=sys.stderr)
 

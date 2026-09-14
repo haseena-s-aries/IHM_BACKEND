@@ -1064,9 +1064,14 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
                 width=2,
             )
 
-            text_y = clear_y1 + 8
+            total_text_h = len(lines) * line_h
+            text_y = clear_y1 + max(8, ((clear_y2 - clear_y1) - total_text_h) / 2)
+
             for line in lines:
-                draw.text((clear_x1 + 10, text_y), line, fill=blue, font=font)
+                line_box = draw.textbbox((0, 0), line, font=font)
+                line_w = line_box[2] - line_box[0]
+                text_x = clear_x1 + max(0, ((clear_x2 - clear_x1) - line_w) / 2)
+                draw.text((text_x, text_y), line, fill=blue, font=font)
                 text_y += line_h
 
             used_boxes.append((clear_x1, clear_y1, clear_x2, clear_y2))
@@ -1207,10 +1212,16 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         x1, y1, x2, y2 = item["box"]
         draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=4)
 
-        text_y = y1 + 9
+        line_h = 38
+        total_text_h = len(item["lines"]) * line_h
+        text_y = y1 + max(9, ((y2 - y1) - total_text_h) / 2)
+
         for line in item["lines"]:
-            draw.text((x1 + 14, text_y), line, fill=blue, font=font)
-            text_y += 38
+            line_box = draw.textbbox((0, 0), line, font=font)
+            line_w = line_box[2] - line_box[0]
+            text_x = x1 + max(0, ((x2 - x1) - line_w) / 2)
+            draw.text((text_x, text_y), line, fill=blue, font=font)
+            text_y += line_h
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas_img.save(output_path, format="PNG")
@@ -1477,10 +1488,31 @@ def make_hazard_layout_pages_from_images(images, vessel_name, company_name):
         if not image_path.exists() or image_path.stat().st_size <= 0:
             print(f"HAZARD IMAGE PDF INSERT FAILED missing_or_empty={image_path}", file=sys.stderr)
             raise FileNotFoundError(f"Hazardous I-2 image missing or empty: {image_path}")
+        with Image.open(image_path) as img:
+            img_w, img_h = img.size
+
+        max_page_width = 1600
+        max_page_height = 1100
+        # Reserve space for the common header/footer and the first-page title.
+        # Without the title band, the image can overlap and clip the heading.
+        header_footer_space = 210
+
+        scale = min(
+            max_page_width / img_w,
+            (max_page_height - header_footer_space) / img_h,
+            1
+        )
+
+        draw_w = img_w * scale
+        draw_h = img_h * scale
+
+        page_width = max(840, draw_w + 90)
+        page_height = max(580, draw_h + header_footer_space)
+
         packet = BytesIO()
         c = canvas.Canvas(
             packet,
-            pagesize=(HAZARD_LAYOUT_PAGE_WIDTH, HAZARD_LAYOUT_PAGE_HEIGHT)
+            pagesize=(page_width, page_height)
         )
 
         draw_common_header_footer(
@@ -1494,29 +1526,24 @@ def make_hazard_layout_pages_from_images(images, vessel_name, company_name):
             title = "LOCATION DIAGRAM OF HAZARDOUS MATERIALS"
             title_font = TABLE_FONT_BOLD
             title_size = 12
-            title_y = HAZARD_LAYOUT_PAGE_HEIGHT - 92
+            title_y = page_height - 92
             title_w = pdfmetrics.stringWidth(title, title_font, title_size)
 
             c.setFont(title_font, title_size)
             c.setFillColor(colors.black)
-            c.drawString((HAZARD_LAYOUT_PAGE_WIDTH - title_w) / 2, title_y, title)
+            c.drawString((page_width - title_w) / 2, title_y, title)
             c.line(
-                (HAZARD_LAYOUT_PAGE_WIDTH - title_w) / 2,
+                (page_width - title_w) / 2,
                 title_y - 2,
-                (HAZARD_LAYOUT_PAGE_WIDTH + title_w) / 2,
+                (page_width + title_w) / 2,
                 title_y - 2
             )
 
         usable_x = 45
         usable_y = 75
-        usable_w = HAZARD_LAYOUT_PAGE_WIDTH - 90
-        usable_h = HAZARD_LAYOUT_PAGE_HEIGHT - 180
-
-        img = Image.open(image_path)
-        img_w, img_h = img.size
-        scale = min(usable_w / img_w, usable_h / img_h)
-        draw_w = img_w * scale
-        draw_h = img_h * scale
+        usable_w = page_width - 90
+        usable_top = page_height - 125
+        usable_h = usable_top - usable_y
 
         pdf_ready_image = make_hazard_pdf_ready_image(
             image_path,
@@ -1527,7 +1554,7 @@ def make_hazard_layout_pages_from_images(images, vessel_name, company_name):
 
         c.drawImage(
             str(pdf_ready_image),
-            (HAZARD_LAYOUT_PAGE_WIDTH - draw_w) / 2,
+            (page_width - draw_w) / 2,
             usable_y + (usable_h - draw_h) / 2,
             width=draw_w,
             height=draw_h,

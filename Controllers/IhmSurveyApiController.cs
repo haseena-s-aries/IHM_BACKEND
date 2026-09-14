@@ -51,7 +51,6 @@ namespace Survey_Certification_App.Controllers
             _logger = logger;
             _env = env;
         }
-        [Route("api/ihm-survey")]
 
         
         private void QueueMarkedImages(int jobId, bool force = false)
@@ -205,7 +204,8 @@ namespace Survey_Certification_App.Controllers
     ? await _db.IhmImageMarkers.FirstOrDefaultAsync(x =>
         x.SurveyJobId == request.SurveyJobId &&
         x.IhmAreaId == request.IhmAreaId &&
-        x.IhmCheckpointId == request.IhmCheckpointId)
+        x.IhmCheckpointId == request.IhmCheckpointId &&
+        x.ImagePath == normalizedImagePath)
     : null;
 
             if (marker == null)
@@ -244,7 +244,8 @@ namespace Survey_Certification_App.Controllers
                         x.Id != marker.Id &&
                         x.SurveyJobId == request.SurveyJobId &&
                         x.IhmAreaId == request.IhmAreaId &&
-                        x.IhmCheckpointId == request.IhmCheckpointId)
+                        x.IhmCheckpointId == request.IhmCheckpointId &&
+                        x.ImagePath == normalizedImagePath)
                     .ToListAsync();
 
                 if (duplicateMarkers.Count > 0)
@@ -424,27 +425,10 @@ namespace Survey_Certification_App.Controllers
             if (markerType == "sample" && !string.IsNullOrWhiteSpace(checkpointCode))
                 return checkpointCode;
 
-            if (markerType == "visual" &&
-                !string.IsNullOrWhiteSpace(checkpointCode) &&
-                checkpointCode.StartsWith("V", StringComparison.OrdinalIgnoreCase))
-            {
+            if (markerType == "visual" && !string.IsNullOrWhiteSpace(checkpointCode))
                 return checkpointCode;
-            }
 
-            var visualCheckpointIds = await _db.IhmCheckpoints
-                .Where(x =>
-                    x.SurveyJobId == checkpoint.SurveyJobId &&
-                    x.IhmAreaId == checkpoint.IhmAreaId &&
-                    x.VisualCheck != null &&
-                    x.VisualCheck.Trim().ToUpper() == "V")
-                .OrderBy(x => x.SourceRowNumber ?? int.MaxValue)
-                .ThenBy(x => x.Sample_No)
-                .ThenBy(x => x.Id)
-                .Select(x => x.Id)
-                .ToListAsync();
-
-            var index = visualCheckpointIds.IndexOf(checkpoint.Id);
-            return index >= 0 ? $"V{index + 1}" : checkpointCode;
+            return checkpointCode;
         }
 
         private async Task NormalizeMarkerLabelsAsync(int jobId)
@@ -1747,6 +1731,79 @@ namespace Survey_Certification_App.Controllers
                 message = "Marker deleted.",
                 id = markerId,
                 deletedCount = markersToDelete.Count
+            });
+        }
+        [HttpDelete("jobs/{jobId:int}/layouts")]
+        public async Task<IActionResult> DeleteLayoutAttachment(int jobId, [FromQuery] string target)
+        {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return Forbid();
+
+            if (string.IsNullOrWhiteSpace(target))
+                return BadRequest("Layout target is required.");
+
+            int? areaId = null;
+            var normalizedTarget = target.Trim();
+
+            if (!string.Equals(normalizedTarget, "common", StringComparison.OrdinalIgnoreCase))
+            {
+                if (normalizedTarget.StartsWith("area:", StringComparison.OrdinalIgnoreCase))
+                    normalizedTarget = normalizedTarget["area:".Length..];
+
+                if (!int.TryParse(normalizedTarget, out var parsedAreaId) || parsedAreaId <= 0)
+                    return BadRequest("Invalid layout target.");
+
+                areaId = parsedAreaId;
+            }
+
+            var query = _db.IhmSamplingPhotos
+                .Where(x => x.SurveyJobId == jobId && x.IhmCheckpointId == null);
+
+            query = areaId.HasValue
+                ? query.Where(x => x.IhmAreaId == areaId.Value)
+                : query.Where(x => x.IhmAreaId == null && x.Caption == "Full GA layout");
+
+            var layouts = await query.ToListAsync();
+
+            if (!layouts.Any())
+                return NotFound("No layout attachment found.");
+
+            var webRoot = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+
+            foreach (var layout in layouts)
+            {
+                if (!string.IsNullOrWhiteSpace(layout.FilePath))
+                {
+                    var physicalPath = Path.Combine(
+                        webRoot,
+                        layout.FilePath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar)
+                    );
+
+                    if (System.IO.File.Exists(physicalPath))
+                        System.IO.File.Delete(physicalPath);
+                }
+
+                if (!string.IsNullOrWhiteSpace(layout.StoredFileName))
+                {
+                    var folder = areaId.HasValue
+                        ? Path.Combine(webRoot, "uploads", "ihm-area-layouts", jobId.ToString(), areaId.Value.ToString())
+                        : Path.Combine(webRoot, "uploads", "ihm-ga-layouts", jobId.ToString());
+
+                    var storedPath = Path.Combine(folder, layout.StoredFileName);
+                    if (System.IO.File.Exists(storedPath))
+                        System.IO.File.Delete(storedPath);
+                }
+            }
+
+            _db.IhmSamplingPhotos.RemoveRange(layouts);
+            await _db.SaveChangesAsync();
+
+            QueueMarkedImages(jobId, force: true);
+
+            return Ok(new
+            {
+                message = "Layout attachment deleted.",
+                target
             });
         }
 

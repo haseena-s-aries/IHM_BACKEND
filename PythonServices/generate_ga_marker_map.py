@@ -704,8 +704,11 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         text_h = item["text_h"]
 
         draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=4)
+        text_x = x1 + max(0, (label_w - text_w) / 2)
+        text_y = y1 + max(6, (label_h - text_h) / 2 - 2)
+
         draw.text(
-            (x1 + 14, y1 + max(6, (label_h - text_h) / 2 - 2)),
+            (text_x, text_y),
             label,
             fill=blue,
             font=font,
