@@ -192,6 +192,10 @@ namespace Survey_Certification_App.Models.Survey
         [MaxLength(500)]
         public string? Caption { get; set; }
 
+        // JSON array of IHM area IDs assigned to this global machinery layout.
+        [MaxLength(4000)]
+        public string? AssignedAreaIds { get; set; }
+
         public int UploadedByUserId { get; set; }
         public bool ShowInAppendixThree { get; set; }
         public int AppendixThreeSortOrder { get; set; }

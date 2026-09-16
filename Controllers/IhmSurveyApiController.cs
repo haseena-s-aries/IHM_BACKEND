@@ -204,8 +204,7 @@ namespace Survey_Certification_App.Controllers
     ? await _db.IhmImageMarkers.FirstOrDefaultAsync(x =>
         x.SurveyJobId == request.SurveyJobId &&
         x.IhmAreaId == request.IhmAreaId &&
-        x.IhmCheckpointId == request.IhmCheckpointId &&
-        x.ImagePath == normalizedImagePath)
+        x.IhmCheckpointId == request.IhmCheckpointId)
     : null;
 
             if (marker == null)
@@ -244,8 +243,7 @@ namespace Survey_Certification_App.Controllers
                         x.Id != marker.Id &&
                         x.SurveyJobId == request.SurveyJobId &&
                         x.IhmAreaId == request.IhmAreaId &&
-                        x.IhmCheckpointId == request.IhmCheckpointId &&
-                        x.ImagePath == normalizedImagePath)
+                        x.IhmCheckpointId == request.IhmCheckpointId)
                     .ToListAsync();
 
                 if (duplicateMarkers.Count > 0)
@@ -1616,17 +1614,23 @@ namespace Survey_Certification_App.Controllers
             var photos = await _db.IhmSamplingPhotos
                 .Where(x => x.SurveyJobId == jobId &&
                             x.IhmCheckpointId == null &&
-                            (x.IhmAreaId != null || x.Caption == "Full GA layout"))
+                            (x.IhmAreaId != null || x.Caption == "Full GA layout" || x.Caption == "Machinery layout"))
                 .OrderByDescending(x => x.UploadedAt)
                 .ToListAsync();
 
             var latest = photos
-                .GroupBy(x => x.IhmAreaId?.ToString() ?? "common")
+                .GroupBy(x => x.Caption == "Machinery layout"
+                    ? $"machinery:{x.Id}"
+                    : x.IhmAreaId?.ToString() ?? "common")
                 .Select(x => x.First())
                 .Select(x => new
                 {
-                    Target = x.IhmAreaId?.ToString() ?? "common",
+                    x.Id,
+                    Target = x.Caption == "Machinery layout"
+                        ? "machinery"
+                        : x.IhmAreaId?.ToString() ?? "common",
                     x.OriginalFileName,
+                    x.AssignedAreaIds,
                     FilePath = $"{Request.Scheme}://{Request.Host}{x.FilePath}"
                 });
 
@@ -1639,67 +1643,52 @@ namespace Survey_Certification_App.Controllers
             if (!await CanAccessIhmJobAsync(jobId))
                 return Forbid();
 
-            var areas = await _db.IhmAreas
-                .AsNoTracking()
-                .Where(x =>
-                    x.SurveyJobId == jobId &&
-                    x.AreaName != null &&
-                    x.AreaName.Trim() != "")
-                .OrderBy(x => x.SortOrder)
-                .ThenBy(x => x.Id)
-                .Select(x => new
-                {
-                    x.Id,
-                    AreaName = x.AreaName.Trim()
-                })
-                .ToListAsync();
-
             var photos = await _db.IhmSamplingPhotos
                 .AsNoTracking()
                 .Where(x =>
                     x.SurveyJobId == jobId &&
+                    x.IhmAreaId == null &&
                     x.IhmCheckpointId == null &&
-                    (x.IhmAreaId != null || x.Caption == "Full GA layout"))
+                    (x.Caption == "Full GA layout" || x.Caption == "Machinery layout"))
                 .OrderByDescending(x => x.UploadedAt)
                 .ToListAsync();
 
-            var attachmentMap = photos
-                .GroupBy(x => x.IhmAreaId?.ToString() ?? "common")
-                .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
-
-            attachmentMap.TryGetValue("common", out var commonAttachment);
-
-            var uniqueAreas = areas
-                .GroupBy(x => x.AreaName, StringComparer.OrdinalIgnoreCase)
-                .Select(x => x.First())
-                .Select(area =>
+            var gaLayout = photos.FirstOrDefault(x => x.Caption == "Full GA layout");
+            var machineryLayouts = photos
+                .Where(x => x.Caption == "Machinery layout")
+                .Select(x => new
                 {
-                    attachmentMap.TryGetValue(area.Id.ToString(), out var attachment);
-                    return new
-                    {
-                        id = area.Id,
-                        value = $"area:{area.Id}",
-                        label = area.AreaName,
-                        originalFileName = attachment?.OriginalFileName,
-                        filePath = attachment == null
-                            ? null
-                            : $"{Request.Scheme}://{Request.Host}{attachment.FilePath}"
-                    };
+                    id = x.Id,
+                    originalFileName = x.OriginalFileName,
+                    assignedAreaIds = x.AssignedAreaIds,
+                    filePath = $"{Request.Scheme}://{Request.Host}{x.FilePath}"
                 })
                 .ToList();
 
             return Ok(new
             {
-                commonLayout = new
+                layouts = new object[]
                 {
-                    value = "common",
-                    label = "Common Layout - fallback for every location",
-                    originalFileName = commonAttachment?.OriginalFileName,
-                    filePath = commonAttachment == null
-                        ? null
-                        : $"{Request.Scheme}://{Request.Host}{commonAttachment.FilePath}"
-                },
-                areas = uniqueAreas
+                    new
+                    {
+                        target = "common",
+                        layoutType = "GA",
+                        label = "GA Layout",
+                        originalFileName = gaLayout?.OriginalFileName,
+                        filePath = gaLayout == null
+                            ? null
+                            : $"{Request.Scheme}://{Request.Host}{gaLayout.FilePath}"
+                    },
+                    new
+                    {
+                        target = "machinery",
+                        layoutType = "Machinery",
+                        label = "Machinery Layout",
+                        originalFileName = machineryLayouts.FirstOrDefault()?.originalFileName,
+                        filePath = machineryLayouts.FirstOrDefault()?.filePath,
+                        files = machineryLayouts
+                    }
+                }
             });
         }
 
@@ -1745,7 +1734,11 @@ namespace Survey_Certification_App.Controllers
             int? areaId = null;
             var normalizedTarget = target.Trim();
 
-            if (!string.Equals(normalizedTarget, "common", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(normalizedTarget, "machinery", StringComparison.OrdinalIgnoreCase))
+            {
+                areaId = null;
+            }
+            else if (!string.Equals(normalizedTarget, "common", StringComparison.OrdinalIgnoreCase))
             {
                 if (normalizedTarget.StartsWith("area:", StringComparison.OrdinalIgnoreCase))
                     normalizedTarget = normalizedTarget["area:".Length..];
@@ -1759,7 +1752,9 @@ namespace Survey_Certification_App.Controllers
             var query = _db.IhmSamplingPhotos
                 .Where(x => x.SurveyJobId == jobId && x.IhmCheckpointId == null);
 
-            query = areaId.HasValue
+            query = string.Equals(normalizedTarget, "machinery", StringComparison.OrdinalIgnoreCase)
+                ? query.Where(x => x.IhmAreaId == null && x.Caption == "Machinery layout")
+                : areaId.HasValue
                 ? query.Where(x => x.IhmAreaId == areaId.Value)
                 : query.Where(x => x.IhmAreaId == null && x.Caption == "Full GA layout");
 
@@ -1905,6 +1900,124 @@ namespace Survey_Certification_App.Controllers
                 filePath = existingGa.FilePath
             });
         }
+        [HttpPost("jobs/{jobId:int}/machinery-layout")]
+        public async Task<IActionResult> UploadMachineryLayout(
+            int jobId,
+            IFormFile file,
+            [FromForm] int? uploadedByUserId,
+            [FromForm] string? assignedAreaIds)
+        {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return NotFound("Survey job not found.");
+
+            if (file == null || file.Length == 0)
+                return BadRequest("Machinery layout file is required.");
+
+            var allowedExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp", ".pdf" };
+            var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
+            if (!allowedExtensions.Contains(extension))
+                return BadRequest("Only image or PDF files are allowed.");
+
+            var uploadFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads", "ihm-machinery-layouts", jobId.ToString());
+            Directory.CreateDirectory(uploadFolder);
+
+            var isPdf = extension == ".pdf";
+            var baseName = Guid.NewGuid().ToString();
+            var storedFileName = isPdf ? $"{baseName}.pdf" : $"{baseName}{extension}";
+            var physicalPath = Path.Combine(uploadFolder, storedFileName);
+
+            await using (var stream = new FileStream(physicalPath, FileMode.Create))
+                await file.CopyToAsync(stream);
+
+            var markerFileName = storedFileName;
+            if (isPdf)
+            {
+                markerFileName = $"{baseName}.jpg";
+                try
+                {
+                    await ConvertPdfFirstPageToImageAsync(physicalPath, Path.Combine(uploadFolder, markerFileName));
+                }
+                catch (Exception ex)
+                {
+                    return BadRequest(new { message = "PDF uploaded, but first page image conversion failed.", detail = ex.Message });
+                }
+            }
+
+            var filePath = $"/uploads/ihm-machinery-layouts/{jobId}/{markerFileName}";
+            var existing = new IhmSamplingPhoto { SurveyJobId = jobId, Caption = "Machinery layout" };
+            _db.IhmSamplingPhotos.Add(existing);
+
+            existing.OriginalFileName = file.FileName;
+            existing.StoredFileName = storedFileName;
+            existing.FilePath = filePath;
+            existing.ContentType = "image/jpeg";
+            existing.UploadedByUserId = uploadedByUserId ?? GetCurrentUserId() ?? 0;
+            existing.UploadedAt = DateTime.UtcNow;
+            var requestedAreaIds = (assignedAreaIds ?? "")
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(x => int.TryParse(x, out var value) && value > 0)
+                .Select(int.Parse)
+                .Distinct()
+                .ToHashSet();
+
+            var otherMachinery = await _db.IhmSamplingPhotos
+                .Where(x => x.SurveyJobId == jobId &&
+                            x.IhmAreaId == null &&
+                            x.IhmCheckpointId == null &&
+                            x.Caption == "Machinery layout")
+                .ToListAsync();
+
+            foreach (var other in otherMachinery)
+            {
+                var remaining = (other.AssignedAreaIds ?? "")
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(x => int.TryParse(x, out var value) && !requestedAreaIds.Contains(value))
+                    .Distinct();
+                other.AssignedAreaIds = string.Join(',', remaining);
+            }
+
+            existing.AssignedAreaIds = string.Join(',', requestedAreaIds.OrderBy(x => x));
+
+            await _db.SaveChangesAsync();
+            return Ok(new { message = "Machinery layout uploaded successfully.", id = existing.Id, jobId, filePath = existing.FilePath, assignedAreaIds = existing.AssignedAreaIds });
+        }
+        [HttpPut("jobs/{jobId:int}/machinery-layouts/{layoutId:int}/assignment")]
+        public async Task<IActionResult> UpdateMachineryLayoutAssignment(
+            int jobId, int layoutId, [FromForm] string? assignedAreaIds)
+        {
+            if (!await CanAccessIhmJobAsync(jobId)) return Forbid();
+
+            var layout = await _db.IhmSamplingPhotos.FirstOrDefaultAsync(x =>
+                x.Id == layoutId && x.SurveyJobId == jobId &&
+                x.IhmAreaId == null && x.IhmCheckpointId == null &&
+                x.Caption == "Machinery layout");
+            if (layout == null) return NotFound("Machinery layout not found.");
+
+            var ids = (assignedAreaIds ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(x => int.TryParse(x, out var id) && id > 0).Select(int.Parse).Distinct().ToHashSet();
+            var others = await _db.IhmSamplingPhotos.Where(x => x.SurveyJobId == jobId && x.Id != layoutId && x.Caption == "Machinery layout").ToListAsync();
+            foreach (var other in others)
+                other.AssignedAreaIds = string.Join(',', (other.AssignedAreaIds ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(x => int.TryParse(x, out var id) && !ids.Contains(id)).Distinct());
+            layout.AssignedAreaIds = string.Join(',', ids.OrderBy(x => x));
+            await _db.SaveChangesAsync();
+            QueueMarkedImages(jobId, force: true);
+            return Ok(new { layoutId, assignedAreaIds = layout.AssignedAreaIds });
+        }
+
+        [HttpDelete("jobs/{jobId:int}/machinery-layouts/{layoutId:int}")]
+        public async Task<IActionResult> DeleteMachineryLayout(int jobId, int layoutId)
+        {
+            if (!await CanAccessIhmJobAsync(jobId)) return Forbid();
+            var layout = await _db.IhmSamplingPhotos.FirstOrDefaultAsync(x => x.Id == layoutId && x.SurveyJobId == jobId && x.Caption == "Machinery layout");
+            if (layout == null) return NotFound("Machinery layout not found.");
+            var physicalPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", layout.FilePath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+            if (System.IO.File.Exists(physicalPath)) System.IO.File.Delete(physicalPath);
+            _db.IhmSamplingPhotos.Remove(layout);
+            await _db.SaveChangesAsync();
+            QueueMarkedImages(jobId, force: true);
+            return Ok(new { layoutId });
+        }
+
         [HttpPost("jobs/{jobId:int}/marked-images/regenerate")]
         public IActionResult RegenerateMarkedImages(
     int jobId,

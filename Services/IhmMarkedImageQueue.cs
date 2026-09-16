@@ -274,7 +274,9 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
 
             var pythonExe = File.Exists(Path.Combine(env.ContentRootPath, ".venv", "Scripts", "python.exe"))
                 ? Path.Combine(env.ContentRootPath, ".venv", "Scripts", "python.exe")
-                : "python";
+                : File.Exists(Path.Combine(env.ContentRootPath, "venv", "Scripts", "python.exe"))
+                    ? Path.Combine(env.ContentRootPath, "venv", "Scripts", "python.exe")
+                    : "python";
 
             var startInfo = new ProcessStartInfo
             {
@@ -285,6 +287,11 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            var userPythonPackages = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Python", "Python314", "site-packages");
+            if (Directory.Exists(userPythonPackages))
+                startInfo.Environment["PYTHONPATH"] = userPythonPackages;
 
             using var process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("Unable to start GA map generator.");
@@ -374,6 +381,15 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
                 .FirstOrDefaultAsync(cancellationToken);
         }
 
+        var machineryLayout = await db.IhmSamplingPhotos
+            .Where(x => x.SurveyJobId == jobId &&
+                        x.IhmAreaId == null &&
+                        x.IhmCheckpointId == null &&
+                        x.Caption == "Machinery layout")
+            .OrderByDescending(x => x.UploadedAt)
+            .Select(x => x.FilePath)
+            .FirstOrDefaultAsync(cancellationToken);
+
         var areaLayouts = await db.IhmSamplingPhotos
             .Where(x => x.SurveyJobId == jobId &&
                         x.IhmAreaId != null &&
@@ -428,6 +444,7 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         var payload = new
         {
             GaLayout = gaLayout,
+            MachineryLayout = machineryLayout,
             AreaLayouts = areaLayouts,
             Markers = markers,
             Placements = placements
@@ -529,7 +546,9 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
 
             var pythonExe = File.Exists(Path.Combine(env.ContentRootPath, ".venv", "Scripts", "python.exe"))
                 ? Path.Combine(env.ContentRootPath, ".venv", "Scripts", "python.exe")
-                : "python";
+                : File.Exists(Path.Combine(env.ContentRootPath, "venv", "Scripts", "python.exe"))
+                    ? Path.Combine(env.ContentRootPath, "venv", "Scripts", "python.exe")
+                    : "python";
 
             var startInfo = new ProcessStartInfo
             {
@@ -540,6 +559,11 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            var userPythonPackages = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Python", "Python314", "site-packages");
+            if (Directory.Exists(userPythonPackages))
+                startInfo.Environment["PYTHONPATH"] = userPythonPackages;
 
             using var process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("Unable to start hazardous I-2 marked image generator.");
@@ -609,6 +633,15 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
     .OrderByDescending(x => x.UploadedAt)
     .Select(x => x.FilePath)
     .FirstOrDefaultAsync(cancellationToken);
+
+        var machineryLayout = await db.IhmSamplingPhotos
+            .Where(x => x.SurveyJobId == jobId &&
+                        x.IhmAreaId == null &&
+                        x.IhmCheckpointId == null &&
+                        x.Caption == "Machinery layout")
+            .OrderByDescending(x => x.UploadedAt)
+            .Select(x => x.FilePath)
+            .FirstOrDefaultAsync(cancellationToken);
         var equipmentAndMachinery = await db.IhmCheckpoints
             .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
             .OrderBy(x => x.Id)
@@ -666,6 +699,7 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         {
             Job = job,
             GaLayout = gaLayout,
+            MachineryLayout = machineryLayout,
             EquipmentAndMachinery = equipmentAndMachinery,
             AreaLayouts = areaLayouts,
             Markers = markers

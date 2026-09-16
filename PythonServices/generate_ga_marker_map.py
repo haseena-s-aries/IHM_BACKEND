@@ -107,6 +107,14 @@ def find_template_position(ga_image_path, area_image_path):
     ga_h, ga_w = ga.shape[:2]
     area_h, area_w = area.shape[:2]
 
+    match_max = 1800
+    match_scale = min(1.0, match_max / max(ga_w, ga_h), match_max / max(area_w, area_h))
+    if match_scale < 1.0:
+        ga = cv2.resize(ga, (max(1, int(ga_w * match_scale)), max(1, int(ga_h * match_scale))), interpolation=cv2.INTER_AREA)
+        area = cv2.resize(area, (max(1, int(area_w * match_scale)), max(1, int(area_h * match_scale))), interpolation=cv2.INTER_AREA)
+        ga_h, ga_w = ga.shape[:2]
+        area_h, area_w = area.shape[:2]
+
     if area_w > ga_w or area_h > ga_h:
         scale = min(ga_w / area_w, ga_h / area_h) * 0.8
         new_w = int(area_w * scale)
@@ -131,6 +139,35 @@ def find_template_position(ga_image_path, area_image_path):
 def text_size(draw, text, font):
     box = draw.textbbox((0, 0), text, font=font)
     return box[2] - box[0], box[3] - box[1]
+
+def build_content_integral(image):
+    gray = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2GRAY)
+    mask = (gray < 235).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    return cv2.integral(mask)
+
+def rect_content_ratio(rect, integral, image_w, image_h):
+    x1, y1, x2, y2 = [int(round(v)) for v in rect]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(image_w, x2), min(image_h, y2)
+    if x2 <= x1 or y2 <= y1:
+        return 1.0
+    occupied = integral[y2, x2] - integral[y1, x2] - integral[y2, x1] + integral[y1, x1]
+    return float(occupied) / float((x2 - x1) * (y2 - y1))
+
+def find_local_drawing_bounds(content_integral, point, layout_box):
+    lx, ly, lw, lh = layout_box
+    px, py = point
+    # Use a bounded local window around the marker; this prevents the complete
+    # page border from becoming the normal routing destination.
+    half_w = max(180, min(lw * 0.22, 900))
+    half_h = max(140, min(lh * 0.22, 700))
+    left = max(lx, px - half_w)
+    top = max(ly, py - half_h)
+    right = min(lx + lw, px + half_w)
+    bottom = min(ly + lh, py + half_h)
+    return left, top, right, bottom
 
 def detect_compartment_rects(image, outer_pad=0):
     cv_img = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
@@ -194,7 +231,7 @@ def group_markers(marker_points, tolerance=6):
     return groups
 
 
-def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_rects=None):
+def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_rects=None, content_integral=None, labels_outside=False):
     if not marker_points:
         return
 
@@ -211,15 +248,16 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
     layout_right = layout_x + layout_w
     layout_bottom = layout_y + layout_h
 
-    groups = group_markers(marker_points, tolerance=28)
+    groups = group_markers(marker_points, tolerance=3)
 
-    label_h = 48
-    gap = 18
+    label_h = 42
+    gap = 10
     margin = 10
-    outside_gap = 28
+    outside_gap = 16
     lane_gap = label_h + gap
-    route_gap = 18
+    route_gap = 10
     collision_pad = 8
+    preferred_length = max(45, min(min(layout_w, layout_h) * 0.07, 140))
 
     placements = []
     used_boxes = []
@@ -248,6 +286,12 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
 
     def has_overlap(box):
         return any(boxes_overlap(box, old_box) for old_box in used_boxes)
+
+    def clean_box(box):
+        if content_integral is None:
+            return True
+        padded = (box[0] - 8, box[1] - 8, box[2] + 8, box[3] + 8)
+        return rect_content_ratio(padded, content_integral, canvas_w, canvas_h) <= 0.04
 
     def segment_box(segment):
         (x1, y1), (x2, y2) = segment
@@ -308,6 +352,8 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         ax2, ay2 = a[1]
         bx1, by1 = b[0]
         bx2, by2 = b[1]
+        if any((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 <= collision_pad ** 2 for p in a for q in b):
+            return True
 
         a_vertical = abs(ax1 - ax2) < 0.1
         b_vertical = abs(bx1 - bx2) < 0.1
@@ -340,10 +386,11 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         return (round(point[0] / 4), round(point[1] / 4))
 
     def marker_side(group):
-        dist_top = group["y"] - layout_y
-        dist_bottom = layout_bottom - group["y"]
-        dist_left = group["x"] - layout_x
-        dist_right = layout_right - group["x"]
+        local_left, local_top, local_right, local_bottom = group.get("local_bounds", (layout_x, layout_y, layout_right, layout_bottom))
+        dist_top = group["y"] - local_top
+        dist_bottom = local_bottom - group["y"]
+        dist_left = group["x"] - local_left
+        dist_right = local_right - group["x"]
 
         distances = [
             ("top", dist_top),
@@ -356,17 +403,18 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
     def label_box_for_side(group, label_w, side, lane):
         target_x = group.get("draw_x", group["x"])
         target_y = group.get("draw_y", group["y"])
+        local_left, local_top, local_right, local_bottom = group.get("local_bounds", (layout_x, layout_y, layout_right, layout_bottom))
         if side == "top":
             box_x = target_x - label_w / 2
-            box_y = layout_y - outside_gap - label_h - (lane * lane_gap)
+            box_y = (layout_y - outside_gap - label_h if labels_outside else target_y - preferred_length - label_h) - (lane * lane_gap)
         elif side == "bottom":
             box_x = target_x - label_w / 2
-            box_y = layout_bottom + outside_gap + (lane * lane_gap)
+            box_y = (layout_bottom + outside_gap if labels_outside else target_y + preferred_length) + (lane * lane_gap)
         elif side == "left":
-            box_x = layout_x - outside_gap - label_w - (lane * (label_w + gap))
+            box_x = (layout_x - outside_gap - label_w if labels_outside else target_x - preferred_length - label_w) - (lane * (label_w + gap))
             box_y = target_y - label_h / 2
         else:
-            box_x = layout_right + outside_gap + (lane * (label_w + gap))
+            box_x = (layout_right + outside_gap if labels_outside else target_x + preferred_length) + (lane * (label_w + gap))
             box_y = target_y - label_h / 2
 
         box_x = max(margin, min(box_x, canvas_w - label_w - margin))
@@ -514,7 +562,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
             outside_y = layout_y - route_gap if side == "top" else layout_bottom + route_gap
 
             lane_candidates = []
-            for offset in (18, -18, 32, -32, 48, -48, 66, -66, 88, -88, 112, -112):
+            for offset in (12, -12, 22, -22, 34, -34, 46, -46):
                 lane_x = target[0] + offset
                 lane_x = max(layout_x - outside_gap, min(lane_x, layout_right + outside_gap))
 
@@ -544,7 +592,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
             outside_x = layout_x - route_gap if side == "left" else layout_right + route_gap
 
             lane_candidates = []
-            for offset in (18, -18, 32, -32, 48, -48, 66, -66, 88, -88, 112, -112):
+            for offset in (12, -12, 22, -22, 34, -34, 46, -46):
                 lane_y = target[1] + offset
                 lane_y = max(layout_y - outside_gap, min(lane_y, layout_bottom + outside_gap))
 
@@ -624,6 +672,11 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
     )
 
     for group in ordered_groups:
+        group["local_bounds"] = find_local_drawing_bounds(
+            content_integral,
+            (group["x"], group["y"]),
+            (layout_x, layout_y, layout_w, layout_h)
+        ) if content_integral is not None else (layout_x, layout_y, layout_right, layout_bottom)
         label = ", ".join(group["labels"])
         text_w, text_h = text_size(draw, label, font)
         label_w = max(110, text_w + 28)
@@ -632,7 +685,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         chosen_box = None
         for lane in range(10):
             box = label_box_for_side(group, label_w, side, lane)
-            if not has_overlap(box):
+            if not has_overlap(box) and clean_box(box):
                 chosen_box = box
                 break
 
@@ -642,7 +695,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
                     continue
                 for lane in range(10):
                     box = label_box_for_side(group, label_w, alt_side, lane)
-                    if not has_overlap(box):
+                    if not has_overlap(box) and clean_box(box):
                         side = alt_side
                         chosen_box = box
                         break
@@ -670,6 +723,8 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
             "group": group,
             "label": label,
             "text_h": text_h,
+            "text_w": text_w,
+            "label_w": label_w,
             "box": chosen_box,
             "path": chosen_path,
         })
@@ -807,7 +862,9 @@ def save_marked_layout(source_path, markers, output_path, outer_pad=120):
         marker_points,
         layout_box=(outer_pad, outer_pad, image_width, image_height),
         canvas_size=marked_image.size,
-        obstacle_rects=obstacle_rects
+        obstacle_rects=obstacle_rects,
+        content_integral=build_content_integral(marked_image),
+        labels_outside=False
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -824,6 +881,7 @@ def main():
     placement_json = Path(sys.argv[3])
 
     data = json.loads(input_json.read_text(encoding="utf-8"))
+    print("APPENDIX4: input loaded", file=sys.stderr, flush=True)
 
     ga_path = resolve_web_path(
         data.get("gaLayoutPhysicalPath") or data.get("gaLayout")
@@ -837,6 +895,7 @@ def main():
         sys.exit(1)
 
     base_img = Image.open(ga_path).convert("RGB")
+    print(f"APPENDIX4: GA image loaded path={ga_path}", file=sys.stderr, flush=True)
     ga_w, ga_h = base_img.size
 
     max_side = 7000
@@ -863,6 +922,8 @@ def main():
     existing_placements = data.get("placements") or []
     layout_count_by_area = {}
     ga_layout_web_path = normalized_web_path(data.get("gaLayout"))
+    machinery_layout_path = data.get("machineryLayout")
+    machinery_web_path = normalized_web_path(machinery_layout_path)
     for layout in area_layouts:
         area_id = layout.get("ihmAreaId")
         if area_id is not None:
@@ -906,6 +967,35 @@ def main():
         "title": "COMMON LAYOUT - MARKED CHECKPOINTS",
         "fileName": output_image.name
     }]
+
+    machinery_markers = [
+        marker for marker in markers
+        if machinery_web_path and marker_matches_image(marker, machinery_web_path)
+    ]
+    old_machinery_image = output_image.parent / "appendix4-machinery-marked.png"
+    if not machinery_layout_path or not machinery_markers:
+        try:
+            old_machinery_image.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if machinery_layout_path and machinery_markers:
+        print(f"APPENDIX4: generating machinery markers={len(machinery_markers)}", file=sys.stderr, flush=True)
+        machinery_path = resolve_web_path(machinery_layout_path)
+        if machinery_path and machinery_path.exists():
+            machinery_output = output_image.parent / "appendix4-machinery-marked.png"
+            save_marked_layout(
+                machinery_path,
+                machinery_markers,
+                machinery_output,
+                outer_pad
+            )
+            generated_layouts.append({
+                "kind": "machinery",
+                "title": "MACHINERY LAYOUT - MARKED CHECKPOINTS",
+                "fileName": machinery_output.name
+            })
+            print("APPENDIX4: machinery image saved", file=sys.stderr, flush=True)
 
     for old_area_image in output_image.parent.glob("appendix4-area-*.png"):
         try:
@@ -1004,11 +1094,14 @@ def main():
         common_marker_points,
         layout_box=(outer_pad, outer_pad, ga_w, ga_h),
         canvas_size=ga_img.size,
-        obstacle_rects=common_obstacle_rects
+        obstacle_rects=common_obstacle_rects,
+        content_integral=build_content_integral(ga_img),
+        labels_outside=False
     )
 
     output_image.parent.mkdir(parents=True, exist_ok=True)
     ga_img.save(output_image, dpi=(300, 300), quality=95)
+    print(f"APPENDIX4: GA image saved path={output_image}", file=sys.stderr, flush=True)
 
     manifest_path = output_image.parent / "appendix4-layout-pages.json"
     manifest_path.write_text(

@@ -222,10 +222,13 @@ def _write_cache_manifest(cache_dir, cache_key, payload):
 def make_hazard_pdf_ready_image(image_path, target_width_pt, target_height_pt, label):
     image_path = Path(image_path)
 
-    target_w_px = max(1, int(float(target_width_pt) / 72 * 450))
-    target_h_px = max(1, int(float(target_height_pt) / 72 * 450))
+    target_w_px = max(1, int(float(target_width_pt) / 72 * 300))
+    target_h_px = max(1, int(float(target_height_pt) / 72 * 300))
 
     ready_path = image_path.parent / f"{image_path.stem}-pdf-ready.tmp.png"
+
+    if ready_path.exists() and ready_path.stat().st_mtime >= image_path.stat().st_mtime:
+        return ready_path
 
     with Image.open(image_path) as img:
         img = ImageOps.exif_transpose(img).convert("RGB")
@@ -724,6 +727,28 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
 
     draw = ImageDraw.Draw(canvas_img)
 
+    gray = cv2.cvtColor(np.array(base), cv2.COLOR_RGB2GRAY)
+    content_mask = (gray < 235).astype(np.uint8)
+    content_integral = cv2.integral(content_mask)
+
+    def clean_label_box(box):
+        x1, y1, x2, y2 = [int(round(value)) for value in box]
+        x1 -= outer_pad
+        x2 -= outer_pad
+        y1 -= outer_pad
+        y2 -= outer_pad
+        x1, y1 = max(0, x1 - 8), max(0, y1 - 8)
+        x2, y2 = min(image_w, x2 + 8), min(image_h, y2 + 8)
+        if x2 <= x1 or y2 <= y1:
+            return False
+        occupied = (
+            content_integral[y2, x2]
+            - content_integral[y1, x2]
+            - content_integral[y2, x1]
+            + content_integral[y1, x1]
+        )
+        return occupied / float((x2 - x1) * (y2 - y1)) <= 0.04
+
     try:
         font = ImageFont.truetype("arialbd.ttf", 32)
     except OSError:
@@ -751,7 +776,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     line_gap = 28
     margin = 8
     collision_pad = 8
-    route_gap = 22
+    route_gap = 10
     outside_gap = line_gap
 
     layout_x = outer_pad
@@ -883,12 +908,18 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         return (round(point[0] / 4), round(point[1] / 4))
 
     def marker_side(x, y):
+        half_w = max(180, min(image_w * 0.22, 900))
+        half_h = max(140, min(image_h * 0.22, 700))
+        local_left = max(layout_x, x - half_w)
+        local_right = min(layout_right, x + half_w)
+        local_top = max(layout_y, y - half_h)
+        local_bottom = min(layout_bottom, y + half_h)
         return min(
             [
-                ("left", x - layout_x),
-                ("right", layout_right - x),
-                ("top", y - layout_y),
-                ("bottom", layout_bottom - y),
+                ("left", x - local_left),
+                ("right", local_right - x),
+                ("top", y - local_top),
+                ("bottom", local_bottom - y),
             ],
             key=lambda item: item[1],
         )[0]
@@ -958,7 +989,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
             outside_step = -route_gap if side == "top" else route_gap
             outside_y = layout_y - route_gap if side == "top" else layout_bottom + route_gap
             lane_candidates = []
-            for offset in (18, -18, 32, -32, 48, -48, 66, -66, 88, -88, 112, -112):
+            for offset in (12, -12, 22, -22, 34, -34, 46, -46):
                 lane_x = target[0] + offset
                 lane_x = max(layout_x - outside_gap, min(lane_x, layout_right + outside_gap))
                 lane_candidates.append([
@@ -985,7 +1016,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
             outside_step = -route_gap if side == "left" else route_gap
             outside_x = layout_x - route_gap if side == "left" else layout_right + route_gap
             lane_candidates = []
-            for offset in (18, -18, 32, -32, 48, -48, 66, -66, 88, -88, 112, -112):
+            for offset in (12, -12, 22, -22, 34, -34, 46, -46):
                 lane_y = target[1] + offset
                 lane_y = max(layout_y - outside_gap, min(lane_y, layout_bottom + outside_gap))
                 lane_candidates.append([
@@ -1094,27 +1125,33 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
             side_index = label_side_counts.get(candidate_side, 0)
             spread_steps = [0, -52, 52, -96, 96, -140, 140, -184, 184]
             spread = spread_steps[side_index % len(spread_steps)]
+            half_w = max(180, min(image_w * 0.22, 900))
+            half_h = max(140, min(image_h * 0.22, 700))
+            local_left = max(layout_x, x - half_w)
+            local_right = min(layout_right, x + half_w)
+            local_top = max(layout_y, y - half_h)
+            local_bottom = min(layout_bottom, y + half_h)
 
             if candidate_side == "top":
                 return (
                     x - label_w / 2 + spread,
-                    layout_y - line_gap - label_h - (lane * (label_h + gap))
+                    local_top - line_gap - label_h - (lane * (label_h + gap))
                 )
 
             if candidate_side == "bottom":
                 return (
                     x - label_w / 2 + spread,
-                    layout_bottom + line_gap + (lane * (label_h + gap))
+                    local_bottom + line_gap + (lane * (label_h + gap))
                 )
 
             if candidate_side == "left":
                 return (
-                    layout_x - line_gap - label_w - (lane * (label_w + gap)),
+                    local_left - line_gap - label_w - (lane * (label_w + gap)),
                     y - label_h / 2 + spread
                 )
 
             return (
-                layout_right + line_gap + (lane * (label_w + gap)),
+                local_right + line_gap + (lane * (label_w + gap)),
                 y - label_h / 2 + spread
             )
 
@@ -1130,7 +1167,10 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
                 test_y = max(margin, min(test_y, canvas_img.size[1] - label_h - margin))
 
                 test_box = (test_x, test_y, test_x + label_w, test_y + label_h)
-                if not any(boxes_overlap(test_box, old_box) for old_box in used_boxes):
+                if (
+                    not any(boxes_overlap(test_box, old_box) for old_box in used_boxes)
+                    and clean_label_box(test_box)
+                ):
                     side = candidate_side
                     box_x = test_x
                     box_y = test_y
@@ -1142,36 +1182,6 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
 
         box_x = max(margin, min(box_x, canvas_img.size[0] - label_w - margin))
         box_y = max(margin, min(box_y, canvas_img.size[1] - label_h - margin))
-
-                # Push label away from existing labels, but never loop forever.
-        for _ in range(30):
-            x1, y1, x2, y2 = box_x, box_y, box_x + label_w, box_y + label_h
-            moved = False
-
-            for old_x1, old_y1, old_x2, old_y2 in used_boxes:
-                overlaps = not (
-                    x2 + gap < old_x1 or
-                    x1 - gap > old_x2 or
-                    y2 + gap < old_y1 or
-                    y1 - gap > old_y2
-                )
-                if not overlaps:
-                    continue
-
-                old_box_y = box_y
-
-                if side == "top":
-                    box_y = old_y1 - label_h - gap
-                else:
-                    box_y = old_y2 + gap
-
-                box_y = max(margin, min(box_y, canvas_img.size[1] - label_h - margin))
-
-                moved = abs(box_y - old_box_y) > 0.1
-                break
-
-            if not moved:
-                break
 
         box = (box_x, box_y, box_x + label_w, box_y + label_h)
         anchor = label_anchor(box, side)
@@ -1581,7 +1591,13 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
     )
     print(f"Appendix4 preGeneratedMarkedImages value={pre_generated}", file=sys.stderr)
 
-    if pre_generated:
+    all_markers = data.get("markers") or data.get("Markers") or []
+    hazardous_markers = [
+        marker for marker in all_markers
+        if str(marker.get("markerLabel") or marker.get("MarkerLabel") or "").strip()
+    ]
+
+    if pre_generated and hazardous_markers:
         manifest_path = resolve_report_image_path(pre_generated)
         if manifest_path and manifest_path.exists():
             try:
@@ -1595,7 +1611,7 @@ def make_i2_hazard_layout_pages(data, vessel_name, company_name):
         else:
             print("Marked image missing, using fallback. section=Hazardous", file=sys.stderr)
 
-    print("Hazardous I-2 marked image manifest missing or empty. Skipping hazardous marked image pages.", file=sys.stderr)
+    print("No hazardous markings found. Skipping hazardous marked image pages.", file=sys.stderr)
     return []
 
 def get_rows(data, *keys):

@@ -57,10 +57,13 @@ def _cache_image(source_path, data, label):
 def make_pdf_ready_image(image_path, target_width_pt, target_height_pt, label):
     image_path = Path(image_path)
 
-    target_w_px = max(1, int(float(target_width_pt) / 72 * 450))
-    target_h_px = max(1, int(float(target_height_pt) / 72 * 450))
+    target_w_px = max(1, int(float(target_width_pt) / 72 * 300))
+    target_h_px = max(1, int(float(target_height_pt) / 72 * 300))
 
     ready_path = image_path.parent / f"{image_path.stem}-pdf-ready.tmp.png"
+
+    if ready_path.exists() and ready_path.stat().st_mtime >= image_path.stat().st_mtime:
+        return ready_path
 
     with Image.open(image_path) as img:
         img = ImageOps.exif_transpose(img).convert("RGB")
