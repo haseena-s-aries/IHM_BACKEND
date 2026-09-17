@@ -236,7 +236,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         return
 
     try:
-        font = ImageFont.truetype("arialbd.ttf", 34)
+        font = ImageFont.truetype("arialbd.ttf", 42)
     except OSError:
         font = ImageFont.load_default()
 
@@ -250,12 +250,14 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
 
     groups = group_markers(marker_points, tolerance=3)
 
-    label_h = 42
-    gap = 10
+    label_h = 54
+    gap = 14
     margin = 10
     outside_gap = 16
     lane_gap = label_h + gap
     route_gap = 10
+    routing_lane_gap = 28
+    base_lane_offset = 30
     collision_pad = 8
     preferred_length = max(45, min(min(layout_w, layout_h) * 0.07, 140))
 
@@ -496,7 +498,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
 
         return min(scored, key=lambda item: (item[0][0], item[0][1]))[1]
 
-    def route_path(anchor, target, side, target_rect):
+    def route_path(anchor, target, side, target_rect, route_index=0):
         def path_has_collision(path):
             for segment in path_segments(path):
                 for box in used_boxes:
@@ -534,6 +536,18 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
             return total + (max(0, len(path) - 2) * 80)
 
         candidates_by_priority = []
+
+        # Give every left/right callout its own vertical routing lane. Without
+        # this, labels with different Y positions can collapse onto one shared
+        # vertical segment near the margin.
+        if side in ("left", "right"):
+            # Keep the lane on the drawing-facing side of the label column.
+            # Every callout gets a different X lane, so no common trunk can form.
+            # Short horizontal exit from the cell, followed by an independent
+            # angled leader to the exact target. No shared trunk is used.
+            direction = 1 if side == "left" else -1
+            short_exit_x = anchor[0] + direction * (base_lane_offset + route_index * routing_lane_gap)
+            return [anchor, (short_exit_x, anchor[1]), target]
 
         # Priority 1: direct straight line only if truly aligned.
         direct_candidates = []
@@ -671,7 +685,12 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         side_groups["right"]
     )
 
-    for group in ordered_groups:
+    # Deterministic Appendix 4 arrangement: fill a vertical left margin column,
+    # then continue in a vertical right margin column. This deliberately avoids
+    # nearest-side placement and keeps every label outside the drawing.
+    column_capacity = max(1, int((canvas_h - (2 * margin)) // lane_gap))
+
+    for group_index, group in enumerate(ordered_groups):
         group["local_bounds"] = find_local_drawing_bounds(
             content_integral,
             (group["x"], group["y"]),
@@ -680,30 +699,11 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         label = ", ".join(group["labels"])
         text_w, text_h = text_size(draw, label, font)
         label_w = max(110, text_w + 28)
-        side = marker_side(group)
-
-        chosen_box = None
-        for lane in range(10):
-            box = label_box_for_side(group, label_w, side, lane)
-            if not has_overlap(box) and clean_box(box):
-                chosen_box = box
-                break
-
-        if chosen_box is None:
-            for alt_side in ("top", "bottom", "left", "right"):
-                if alt_side == side:
-                    continue
-                for lane in range(10):
-                    box = label_box_for_side(group, label_w, alt_side, lane)
-                    if not has_overlap(box) and clean_box(box):
-                        side = alt_side
-                        chosen_box = box
-                        break
-                if chosen_box is not None:
-                    break
-
-        if chosen_box is None:
-            chosen_box = label_box_for_side(group, label_w, side, 10)
+        side = "left" if group_index < column_capacity else "right"
+        lane = group_index if side == "left" else group_index - column_capacity
+        box_x = (layout_x - outside_gap - label_w) if side == "left" else (layout_right + outside_gap)
+        box_y = margin + lane * lane_gap
+        chosen_box = (box_x, box_y, box_x + label_w, box_y + label_h)
 
         target_rect = (
             group.get("draw_x", group["x"]) - 9,
@@ -712,8 +712,13 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
             group.get("draw_y", group["y"]) + 9,
         )
         anchor = label_anchor(chosen_box, side)
-        target = target_point(group, side)
-        chosen_path = route_path(anchor, target, side, target_rect)
+        # Terminate at the stored marker coordinate itself. Only label placement
+        # and leader routing are changed.
+        target = (
+            group.get("draw_x", group["x"]),
+            group.get("draw_y", group["y"])
+        )
+        chosen_path = route_path(anchor, target, side, target_rect, group_index)
 
         used_boxes.append(chosen_box)
         existing_segments.extend(path_segments(chosen_path))
@@ -864,7 +869,8 @@ def save_marked_layout(source_path, markers, output_path, outer_pad=120):
         canvas_size=marked_image.size,
         obstacle_rects=obstacle_rects,
         content_integral=build_content_integral(marked_image),
-        labels_outside=False
+        # Appendix 4 labels must stay in the outer white margin.
+        labels_outside=True
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -922,8 +928,9 @@ def main():
     existing_placements = data.get("placements") or []
     layout_count_by_area = {}
     ga_layout_web_path = normalized_web_path(data.get("gaLayout"))
-    machinery_layout_path = data.get("machineryLayout")
-    machinery_web_path = normalized_web_path(machinery_layout_path)
+    machinery_layouts = data.get("machineryLayouts") or []
+    if not machinery_layouts and data.get("machineryLayout"):
+        machinery_layouts = [{"filePath": data.get("machineryLayout")}]
     for layout in area_layouts:
         area_id = layout.get("ihmAreaId")
         if area_id is not None:
@@ -968,34 +975,22 @@ def main():
         "fileName": output_image.name
     }]
 
-    machinery_markers = [
-        marker for marker in markers
-        if machinery_web_path and marker_matches_image(marker, machinery_web_path)
-    ]
-    old_machinery_image = output_image.parent / "appendix4-machinery-marked.png"
-    if not machinery_layout_path or not machinery_markers:
-        try:
-            old_machinery_image.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    if machinery_layout_path and machinery_markers:
-        print(f"APPENDIX4: generating machinery markers={len(machinery_markers)}", file=sys.stderr, flush=True)
+    for index, machinery in enumerate(machinery_layouts, start=1):
+        machinery_layout_path = machinery.get("filePath") if isinstance(machinery, dict) else machinery
+        machinery_web_path = normalized_web_path(machinery_layout_path)
+        machinery_markers = [marker for marker in markers if machinery_web_path and marker_matches_image(marker, machinery_web_path)]
         machinery_path = resolve_web_path(machinery_layout_path)
-        if machinery_path and machinery_path.exists():
-            machinery_output = output_image.parent / "appendix4-machinery-marked.png"
-            save_marked_layout(
-                machinery_path,
-                machinery_markers,
-                machinery_output,
-                outer_pad
-            )
-            generated_layouts.append({
-                "kind": "machinery",
-                "title": "MACHINERY LAYOUT - MARKED CHECKPOINTS",
-                "fileName": machinery_output.name
-            })
-            print("APPENDIX4: machinery image saved", file=sys.stderr, flush=True)
+        if not machinery_path or not machinery_path.exists() or not machinery_markers:
+            continue
+        print(f"APPENDIX4: generating machinery file={index} markers={len(machinery_markers)}", file=sys.stderr, flush=True)
+        machinery_output = output_image.parent / f"appendix4-machinery-{index}-marked.png"
+        save_marked_layout(machinery_path, machinery_markers, machinery_output, outer_pad)
+        generated_layouts.append({
+            "kind": "machinery",
+            "title": "MACHINERY LAYOUT - MARKED CHECKPOINTS",
+            "fileName": machinery_output.name
+        })
+        print(f"APPENDIX4: machinery image saved file={index}", file=sys.stderr, flush=True)
 
     for old_area_image in output_image.parent.glob("appendix4-area-*.png"):
         try:
@@ -1096,7 +1091,8 @@ def main():
         canvas_size=ga_img.size,
         obstacle_rects=common_obstacle_rects,
         content_integral=build_content_integral(ga_img),
-        labels_outside=False
+        # Keep generated callouts outside the GA drawing, matching hazardous output.
+        labels_outside=True
     )
 
     output_image.parent.mkdir(parents=True, exist_ok=True)

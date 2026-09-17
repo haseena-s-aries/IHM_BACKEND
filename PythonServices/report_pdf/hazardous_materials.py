@@ -569,7 +569,19 @@ def wrap_pil_text(draw, text, font, max_width):
 
         if current:
             lines.append(current)
-        current = word
+        # Break unusually long words instead of dropping or truncating them.
+        if draw.textbbox((0, 0), word, font=font)[2] - draw.textbbox((0, 0), word, font=font)[0] > max_width:
+            chunk = ""
+            for char in word:
+                candidate = chunk + char
+                if chunk and draw.textbbox((0, 0), candidate, font=font)[2] - draw.textbbox((0, 0), candidate, font=font)[0] > max_width:
+                    lines.append(chunk)
+                    chunk = char
+                else:
+                    chunk = candidate
+            current = chunk
+        else:
+            current = word
 
     if current:
         lines.append(current)
@@ -717,7 +729,9 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     base = erase_existing_blue_markings(base, protected_markers)
     image_w, image_h = base.size
 
-    outer_pad = 220
+    # Reserve enough white margin for the wider callout columns.
+    estimated_column_width = max(180, min(520, int(round(image_w * 0.16))))
+    outer_pad = max(220, min(620, estimated_column_width + 40))
     canvas_img = Image.new(
         "RGB",
         (image_w + outer_pad * 2, image_h + outer_pad * 2),
@@ -749,11 +763,19 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         )
         return occupied / float((x2 - x1) * (y2 - y1)) <= 0.04
 
+    # Responsive callout sizing. Keep small source images compact and use a
+    # lighter font so the label column remains readable without dominating it.
+    min_dimension = min(image_w, image_h)
+    dynamic_font_size = max(18, min(34, int(round(min_dimension / 125))))
+    # Prefer a wider, compact label column so descriptions wrap into readable
+    # lines instead of producing tall one-word-per-line cells.
+    column_width = max(180, min(520, int(round(image_w * 0.16))))
+    column_height = max(34, min(58, int(round(min_dimension / 62))))
     try:
-        font = ImageFont.truetype("arialbd.ttf", 32)
+        font = ImageFont.truetype("arial.ttf", dynamic_font_size)
     except OSError:
         try:
-            font = ImageFont.truetype("arialbd.ttf", 32)
+            font = ImageFont.truetype("arial.ttf", dynamic_font_size)
         except OSError:
             font = ImageFont.load_default()
 
@@ -771,8 +793,8 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         "right": 0,
     }
     target_boxes = []
-    label_h_base = 28
-    gap = 12
+    label_h_base = column_height
+    gap = max(6, int(round(column_height * 0.25)))
     line_gap = 28
     margin = 8
     collision_pad = 8
@@ -808,6 +830,9 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
 
     obstacle_rects = detect_compartment_rects(base)
 
+    label_index = 0
+    left_column_y = margin
+    right_column_y = margin
     for item in marker_items:
         marker = item["marker"]
         notes = str(marker.get("notes") or marker.get("Notes") or "").strip().lower()
@@ -971,7 +996,11 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
             total += abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
         return total + (max(0, len(path) - 2) * 80)
 
-    def route_path(anchor, target, side, target_rect):
+    def route_path(anchor, target, side, target_rect, route_index=0):
+        if side in ("left", "right"):
+            direction = 1 if side == "left" else -1
+            short_exit = anchor[0] + direction * (30 + route_index * 28)
+            return [anchor, (short_exit, anchor[1]), target]
         groups = []
         direct = []
         if side in ("top", "bottom") and abs(anchor[0] - target[0]) < 1:
@@ -1060,7 +1089,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         if is_existing_label:
             max_label_w = 360
             lines = wrap_pil_text(draw, label, font, max_label_w - 28)
-            line_h = 38
+            line_h = max(dynamic_font_size + 4, int(round(dynamic_font_size * 1.25)))
 
             label_w = max(
                 90,
@@ -1109,17 +1138,13 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
             continue
 
 
-        max_label_w = 360
-        lines = wrap_pil_text(draw, label, font, max_label_w - 28)
-        line_h = 38
-        label_w = max(
-            90,
-            min(
-                max_label_w,
-                max(draw.textbbox((0, 0), line, font=font)[2] for line in lines) + 28
-            )
-        )
-        label_h = max(label_h_base, len(lines) * line_h + 18)
+        # One fixed width/height per column keeps all stacked cell borders
+        # perfectly aligned. Long labels wrap inside the same cell.
+        label_w = column_width
+        line_h = max(dynamic_font_size + 6, int(round(dynamic_font_size * 1.25)))
+        lines = wrap_pil_text(draw, label, font, label_w - 16)
+        total_text_height = len(lines) * line_h
+        label_h = max(label_h_base, total_text_height + 16)
 
         def make_candidate_box(candidate_side, lane=0):
             side_index = label_side_counts.get(candidate_side, 0)
@@ -1155,39 +1180,26 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
                 y - label_h / 2 + spread
             )
 
-        side = marker_side(x, y)
-        ordered_sides = [side] + [item for item in ("top", "bottom", "left", "right") if item != side]
-        box_x, box_y = make_candidate_box(side)
-
-        for candidate_side in ordered_sides:
-            found_box = False
-            for lane in range(10):
-                test_x, test_y = make_candidate_box(candidate_side, lane)
-                test_x = max(margin, min(test_x, canvas_img.size[0] - label_w - margin))
-                test_y = max(margin, min(test_y, canvas_img.size[1] - label_h - margin))
-
-                test_box = (test_x, test_y, test_x + label_w, test_y + label_h)
-                if (
-                    not any(boxes_overlap(test_box, old_box) for old_box in used_boxes)
-                    and clean_label_box(test_box)
-                ):
-                    side = candidate_side
-                    box_x = test_x
-                    box_y = test_y
-                    found_box = True
-                    break
-
-            if found_box:
-                break
+        # Fill the left column by cumulative height, then overflow to right.
+        if left_column_y + label_h <= canvas_img.size[1] - margin:
+            side = "left"
+            box_y = left_column_y
+            left_column_y += label_h + gap
+        else:
+            side = "right"
+            box_y = right_column_y
+            right_column_y += label_h + gap
+        box_x = (layout_x - outside_gap - label_w) if side == "left" else (layout_right + outside_gap)
 
         box_x = max(margin, min(box_x, canvas_img.size[0] - label_w - margin))
         box_y = max(margin, min(box_y, canvas_img.size[1] - label_h - margin))
 
         box = (box_x, box_y, box_x + label_w, box_y + label_h)
         anchor = label_anchor(box, side)
-        target = target_point(x, y, side)
+        target = (x, y)
         target_rect = (x - 9, y - 9, x + 9, y + 9)
-        path = route_path(anchor, target, side, target_rect)
+        path = route_path(anchor, target, side, target_rect, label_index)
+        label_index += 1
         label_side_counts[side] = label_side_counts.get(side, 0) + 1
         used_boxes.append(box)
         existing_segments.extend(path_segments(path))
@@ -1222,7 +1234,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         x1, y1, x2, y2 = item["box"]
         draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=4)
 
-        line_h = 38
+        line_h = max(dynamic_font_size + 4, int(round(dynamic_font_size * 1.25)))
         total_text_h = len(item["lines"]) * line_h
         text_y = y1 + max(9, ((y2 - y1) - total_text_h) / 2)
 

@@ -381,14 +381,14 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
                 .FirstOrDefaultAsync(cancellationToken);
         }
 
-        var machineryLayout = await db.IhmSamplingPhotos
+        var machineryLayouts = await db.IhmSamplingPhotos
             .Where(x => x.SurveyJobId == jobId &&
                         x.IhmAreaId == null &&
                         x.IhmCheckpointId == null &&
                         x.Caption == "Machinery layout")
             .OrderByDescending(x => x.UploadedAt)
-            .Select(x => x.FilePath)
-            .FirstOrDefaultAsync(cancellationToken);
+            .Select(x => new { x.Id, x.FilePath, x.OriginalFileName, x.AssignedAreaIds })
+            .ToListAsync(cancellationToken);
 
         var areaLayouts = await db.IhmSamplingPhotos
             .Where(x => x.SurveyJobId == jobId &&
@@ -444,7 +444,8 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         var payload = new
         {
             GaLayout = gaLayout,
-            MachineryLayout = machineryLayout,
+            MachineryLayouts = machineryLayouts,
+            MachineryLayout = machineryLayouts.FirstOrDefault()?.FilePath,
             AreaLayouts = areaLayouts,
             Markers = markers,
             Placements = placements
@@ -634,14 +635,14 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
     .Select(x => x.FilePath)
     .FirstOrDefaultAsync(cancellationToken);
 
-        var machineryLayout = await db.IhmSamplingPhotos
+        var machineryLayouts = await db.IhmSamplingPhotos
             .Where(x => x.SurveyJobId == jobId &&
                         x.IhmAreaId == null &&
                         x.IhmCheckpointId == null &&
                         x.Caption == "Machinery layout")
             .OrderByDescending(x => x.UploadedAt)
-            .Select(x => x.FilePath)
-            .FirstOrDefaultAsync(cancellationToken);
+            .Select(x => new { x.Id, x.FilePath, x.OriginalFileName, x.AssignedAreaIds })
+            .ToListAsync(cancellationToken);
         var equipmentAndMachinery = await db.IhmCheckpoints
             .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
             .OrderBy(x => x.Id)
@@ -699,7 +700,8 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         {
             Job = job,
             GaLayout = gaLayout,
-            MachineryLayout = machineryLayout,
+            MachineryLayouts = machineryLayouts,
+            MachineryLayout = machineryLayouts.FirstOrDefault()?.FilePath,
             EquipmentAndMachinery = equipmentAndMachinery,
             AreaLayouts = areaLayouts,
             Markers = markers

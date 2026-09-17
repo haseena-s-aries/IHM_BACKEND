@@ -21,7 +21,6 @@ def is_empty_row(values):
     return all(clean(v) == "" for v in values)
 
 EXPECTED_HEADERS = {
-    2: "sample no",
     3: "table",
     4: "hazardous materials",
     5: "location",
@@ -72,16 +71,20 @@ def find_header_row(ws):
 
             value = clean(ws.cell(row=row, column=col).value).lower()
 
-            if "sample no" in value:
+            if "sample no" in value or "table" in value or "hazardous materials" in value:
 
                 return row
 
-    return 3
+    return None
  
  
 def parse_sheet(ws):
 
     header_row = find_header_row(ws)
+    # Workbooks may contain blank/helper sheets. They are not checklist sheets
+    # and must not cause a false "missing headers" validation failure.
+    if header_row is None:
+        return []
     validate_template(ws, header_row)
  
     # Your template has main headers on row 3 and subheaders on row 4.
@@ -98,6 +101,7 @@ def parse_sheet(ws):
 
             continue
  
+        # Column B / Sample No is optional. Identity is based on D:G.
         sample_no = clean(ws.cell(row=row, column=2).value)
 
         table_type = clean(ws.cell(row=row, column=3).value)
@@ -128,8 +132,9 @@ def parse_sheet(ws):
 
         remarks = clean(ws.cell(row=row, column=16).value)
         location_remarks = clean(ws.cell(row=row, column=17).value)
+        import_key = "|".join(clean(ws.cell(row=row, column=col).value).upper() for col in range(4, 8))
  
-        if not sample_no and not hazardous_material and not location and not equipment_name:
+        if not import_key.replace("|", ""):
 
             continue
  
@@ -156,6 +161,7 @@ def parse_sheet(ws):
         areas[area_name]["checkpoints"].append({
 
             "checkpointCode": sample_no,
+            "importKey": import_key,
 
             "description": description,
 

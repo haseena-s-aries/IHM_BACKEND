@@ -679,7 +679,11 @@ namespace Survey_Certification_App.Controllers
                 await process.WaitForExitAsync();
 
                 if (process.ExitCode != 0)
-                    return StatusCode(500, string.IsNullOrWhiteSpace(error) ? output : error);
+                {
+                    return StatusCode(500,
+                        $"Excel parser failed. parser={parserPath}; python={startInfo.FileName}; " +
+                        (string.IsNullOrWhiteSpace(error) ? output : error));
+                }
 
                 var parsed = JsonSerializer.Deserialize<IhmExcelParseResult>(
                     output,
@@ -690,7 +694,10 @@ namespace Survey_Certification_App.Controllers
                 );
 
                 if (parsed == null || !parsed.Success)
-                    return BadRequest(parsed?.Message ?? "Unable to parse Excel file.");
+                {
+                    var parserMessage = parsed?.Message ?? "Unable to parse Excel file.";
+                    return BadRequest($"Excel parser validation failed. parser={parserPath}; {parserMessage}");
+                }
 
                 if (parsed.Areas == null || parsed.Areas.Count == 0 || parsed.Areas.Sum(x => x.Checkpoints.Count) == 0)
                     return BadRequest("Invalid Excel format. Please upload the VSCP Checklist Template file.");
@@ -820,11 +827,18 @@ namespace Survey_Certification_App.Controllers
                         .ToList();
                 }
 
-                var checkpointsBySampleNo = existingCheckpoints
-                    .GroupBy(x => NormalizeExcelKey(x.Sample_No))
+                static string BuildImportKey(IhmCheckpoint x) => string.Join("|", new[]
+                {
+                    x.HazardousMaterial, x.Location, x.EquipmentName, x.Component
+                }.Select(NormalizeExcelKey));
+
+                var checkpointsByImportKey = existingCheckpoints
+                    .GroupBy(BuildImportKey)
                     .ToDictionary(x => x.Key, x => x.First());
 
-                var importedSampleKeys = new HashSet<string>();
+                var importedKeys = new HashSet<string>();
+                var samplingNumber = 0;
+                var visualNumber = 0;
 
                 foreach (var areaDto in parsed.Areas)
                 {
@@ -832,11 +846,11 @@ namespace Survey_Certification_App.Controllers
 
                     foreach (var checkpointDto in areaDto.Checkpoints)
                     {
-                        var sampleKey = NormalizeExcelKey(checkpointDto.CheckpointCode);
-                        if (sampleKey.Length == 0 || !importedSampleKeys.Add(sampleKey))
+                        var importKey = NormalizeExcelKey(checkpointDto.ImportKey);
+                        if (importKey.Length == 0 || !importedKeys.Add(importKey))
                             continue;
 
-                        var isNewCheckpoint = !checkpointsBySampleNo.TryGetValue(sampleKey, out var checkpoint);
+                        var isNewCheckpoint = !checkpointsByImportKey.TryGetValue(importKey, out var checkpoint);
 
                         if (isNewCheckpoint)
                         {
@@ -850,11 +864,18 @@ namespace Survey_Certification_App.Controllers
                             };
 
                             _db.IhmCheckpoints.Add(checkpoint);
-                            checkpointsBySampleNo[sampleKey] = checkpoint;
+                            checkpointsByImportKey[importKey] = checkpoint;
                         }
 
                         checkpoint.IhmAreaId = area.Id;
-                        checkpoint.Sample_No = checkpointDto.CheckpointCode;
+                        // The Excel row order controls numbering. A row is Visual only
+                        // when the Visual Check column contains V/Visual; otherwise it
+                        // belongs to the Sampling sequence. Do not use Sample No here.
+                        var visualCheck = NormalizeExcelKey(checkpointDto.VisualCheck);
+                        var isVisual = visualCheck == "V" || visualCheck.StartsWith("VISUAL");
+                        checkpoint.Sample_No = isVisual
+                            ? $"V{++visualNumber:00}"
+                            : $"S{++samplingNumber:00}";
                         AssignIfProvided(checkpointDto.Description, value => checkpoint.Description = value ?? string.Empty);
                         AssignIfProvided(checkpointDto.TableType, value => checkpoint.TableType = value);
                         AssignIfProvided(checkpointDto.EquipmentName, value => checkpoint.EquipmentName = value);
@@ -876,7 +897,7 @@ namespace Survey_Certification_App.Controllers
                 }
 
                 var removedCheckpointIds = existingCheckpoints
-                    .Where(x => !importedSampleKeys.Contains(NormalizeExcelKey(x.Sample_No)))
+                    .Where(x => !importedKeys.Contains(BuildImportKey(x)))
                     .Select(x => x.Id)
                     .ToList();
 
@@ -1568,6 +1589,38 @@ namespace Survey_Certification_App.Controllers
         [HttpGet("jobs/{jobId:int}/areas/{areaId:int}/layouts")]
         public async Task<IActionResult> GetApplicableLayouts(int jobId, int areaId)
         {
+            // Machinery layouts are assigned to areas through the CSV area-id list.
+            // Resolve that assignment before falling back to the common GA layout.
+            var machineryLayouts = await _db.IhmSamplingPhotos
+                .Where(x => x.SurveyJobId == jobId &&
+                            x.IhmCheckpointId == null &&
+                            x.IhmAreaId == null &&
+                            x.Caption == "Machinery layout")
+                .OrderByDescending(x => x.UploadedAt)
+                .ToListAsync();
+
+            var machineryLayout = machineryLayouts.FirstOrDefault(x =>
+            {
+                var assignedIds = (x.AssignedAreaIds ?? string.Empty)
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                return assignedIds.Any(id => int.TryParse(id, out var assignedAreaId) && assignedAreaId == areaId);
+            });
+
+            if (machineryLayout != null)
+            {
+                return Ok(new[]
+                {
+                    new
+                    {
+                        machineryLayout.Id,
+                        machineryLayout.IhmAreaId,
+                        machineryLayout.FilePath,
+                        machineryLayout.OriginalFileName,
+                        IsCommon = false
+                    }
+                });
+            }
+
             var areaLayout = await _db.IhmSamplingPhotos
                 .Where(x => x.SurveyJobId == jobId &&
                             x.IhmCheckpointId == null &&
@@ -1905,7 +1958,8 @@ namespace Survey_Certification_App.Controllers
             int jobId,
             IFormFile file,
             [FromForm] int? uploadedByUserId,
-            [FromForm] string? assignedAreaIds)
+            [FromForm] string? assignedAreaIds,
+            [FromForm] int? replaceLayoutId)
         {
             if (!await CanAccessIhmJobAsync(jobId))
                 return NotFound("Survey job not found.");
@@ -1944,8 +1998,16 @@ namespace Survey_Certification_App.Controllers
             }
 
             var filePath = $"/uploads/ihm-machinery-layouts/{jobId}/{markerFileName}";
-            var existing = new IhmSamplingPhoto { SurveyJobId = jobId, Caption = "Machinery layout" };
-            _db.IhmSamplingPhotos.Add(existing);
+            var existing = replaceLayoutId.HasValue
+                ? await _db.IhmSamplingPhotos.FirstOrDefaultAsync(x =>
+                    x.Id == replaceLayoutId.Value && x.SurveyJobId == jobId &&
+                    x.IhmAreaId == null && x.IhmCheckpointId == null &&
+                    x.Caption == "Machinery layout")
+                : null;
+            if (replaceLayoutId.HasValue && existing == null)
+                return NotFound("Machinery layout to replace was not found.");
+            existing ??= new IhmSamplingPhoto { SurveyJobId = jobId, Caption = "Machinery layout" };
+            if (existing.Id == 0) _db.IhmSamplingPhotos.Add(existing);
 
             existing.OriginalFileName = file.FileName;
             existing.StoredFileName = storedFileName;
@@ -3745,6 +3807,7 @@ namespace Survey_Certification_App.Controllers
     public class IhmExcelCheckpointDto
     {
         public string CheckpointCode { get; set; } = string.Empty;
+        public string ImportKey { get; set; } = string.Empty;
         public string Description { get; set; } = string.Empty;
 
         public string? TableType { get; set; }
