@@ -86,20 +86,14 @@ def make_area_layout_page(image_path, data=None):
         img = ImageOps.exif_transpose(img)
         img_width, img_height = img.size
 
-    max_page_width = 1600
-    max_page_height = 1100
-    horizontal_margin = 45
-    header_footer_space = 150
-
-    scale = min(
-        (max_page_width - (horizontal_margin * 2)) / img_width,
-        (max_page_height - header_footer_space) / img_height,
-        1
-    )
-    draw_width = img_width * scale
-    draw_height = img_height * scale
-    page_width = max(840, min(max_page_width, draw_width + (horizontal_margin * 2)))
-    page_height = max(580, min(max_page_height, draw_height + header_footer_space))
+    # Keep the generated drawing at its source pixel dimensions. Do not fit it
+    # into a fixed report page because that shrinks large GA/machinery drawings.
+    draw_width = img_width
+    draw_height = img_height
+    # Drawing-only Appendix 4 page: keep the image as the page content without
+    # consuming space for the report header/footer or changing its proportions.
+    page_width = draw_width
+    page_height = draw_height
 
     page = PageObject.create_blank_page(
         width=page_width,
@@ -109,31 +103,13 @@ def make_area_layout_page(image_path, data=None):
     packet = BytesIO()
     c = canvas.Canvas(packet, pagesize=(page_width, page_height))
 
-    report = data.get("reportInfo") or {}
-    vessel = data.get("vessel") or {}
-    job = data.get("job") or {}
-    draw_common_header_footer(
-        c,
-        vessel_name=vessel.get("vesselName") or job.get("vesselName"),
-        company_name=report.get("companyName"),
-        page_no_text="Page | "
-    )
-
-    pdf_ready_image = make_pdf_ready_image(
-        image_path,
-        draw_width,
-        draw_height,
-        "appendix4-area"
-    )
-
     c.drawImage(
-        ImageReader(str(pdf_ready_image)),
-        (page_width - draw_width) / 2,
-        75 + (page_height - 150 - draw_height) / 2,
+        ImageReader(str(image_path)),
+        0,
+        0,
         width=draw_width,
         height=draw_height,
-        preserveAspectRatio=True,
-        anchor="c",
+        preserveAspectRatio=False,
         mask="auto",
     )
 

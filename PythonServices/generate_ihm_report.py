@@ -895,10 +895,9 @@ def main():
                 )
 
             for index, appendix_four_page in enumerate(appendix_four_pages):
-                if index == 0:
-                    add_page(appendix_four_page)
-                else:
-                    add_page(appendix_four_page, generated_footer=True)
+                # Appendix 4 drawing pages are self-contained layout pages.
+                # Do not stamp the report footer onto them.
+                add_page(appendix_four_page)
 
             continue
         if (

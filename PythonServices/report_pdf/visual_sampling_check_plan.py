@@ -39,7 +39,9 @@ A3_BODY_FONT_SIZE = 12
 A3_HEADER_FONT_SIZE = 12
 A3_LEADING = 14
 A3_CELL_PAD_X = 3
-A3_CELL_PAD_Y = 4
+# Extra vertical padding prevents long equipment names from touching or
+# escaping the cell border when the row is wrapped to multiple lines.
+A3_CELL_PAD_Y = 10
 DEFAULT_SAMPLING_METHODOLOGY = [
     "Wet the Sampling location prior to cutting and allow it to harden after cutting to prevent scatter.",
     "Appropriate Safety procedures are followed during onboard survey.",
@@ -343,7 +345,46 @@ def scaled_checkpoint_col_widths(page_width):
 
 
 def wrap_a3_cell(value, width, font=FONT_TIMES, size=A3_BODY_FONT_SIZE):
-    return wrap_text_to_lines(txt(value), font, size, width - (A3_CELL_PAD_X * 2))
+    return _wrap_with_long_word_breaks(
+        value,
+        font,
+        size,
+        width - (A3_CELL_PAD_X * 2),
+    )
+
+
+def _wrap_with_long_word_breaks(value, font, size, max_width):
+    """Wrap normal text and split unbreakable equipment names if necessary."""
+    lines = []
+    for paragraph in txt(value).splitlines() or [""]:
+        words = paragraph.split() or [""]
+        current = ""
+        for word in words:
+            if pdfmetrics.stringWidth(word, font, size) <= max_width:
+                candidate = f"{current} {word}".strip()
+                if not current or pdfmetrics.stringWidth(candidate, font, size) <= max_width:
+                    current = candidate
+                    continue
+
+            if current:
+                lines.append(current)
+                current = ""
+
+            # Break long words (for example underscore-separated equipment
+            # names) so they never cross into the next cell.
+            chunk = ""
+            for character in word:
+                candidate = chunk + character
+                if chunk and pdfmetrics.stringWidth(candidate, font, size) > max_width:
+                    lines.append(chunk)
+                    chunk = character
+                else:
+                    chunk = candidate
+            current = chunk
+
+        if current or not lines:
+            lines.append(current or "-")
+    return lines or ["-"]
 
 
 def a3_row_height(values, col_widths):
@@ -357,7 +398,7 @@ def a3_row_height(values, col_widths):
 
 
 def draw_centered_wrapped_text(c, x1, y1, x2, y2, value, font=FONT_TIMES, size=A3_BODY_FONT_SIZE):
-    lines = wrap_text_to_lines(txt(value), font, size, (x2 - x1) - (A3_CELL_PAD_X * 2))
+    lines = wrap_a3_cell(value, x2 - x1, font, size)
 
     c.setFont(font, size)
     c.setFillColor(colors.black)
@@ -486,6 +527,12 @@ def make_checkpoint_a3_pages(data):
         for checkpoint in get_ihm_checkpoints(data)
         if any(value not in ("", "-") for value in checkpoint_row_values(checkpoint))
     ]
+    # The API includes the original Excel row number. Keep the PDF table in
+    # Excel order even when Sample_No prefixes/numbers are regenerated.
+    checkpoints.sort(key=lambda row: (
+        int(row.get("sourceRowNumber") or row.get("SourceRowNumber") or 2**31 - 1),
+        int(row.get("id") or row.get("Id") or 2**31 - 1),
+    ))
     print("IHM CHECKPOINT COUNT:", len(checkpoints))
     if not checkpoints:
         return []

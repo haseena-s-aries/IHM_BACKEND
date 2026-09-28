@@ -8,6 +8,11 @@ from urllib.parse import urlparse
 import re
 from pypdf import PdfReader
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+# Uploaded vessel drawings can legitimately be very large. The generator
+# applies its own maximum working size below, so Pillow's defensive pixel
+# limit must not reject a trusted uploaded layout before it can be resized.
+Image.MAX_IMAGE_PIXELS = None
 import cv2
 import numpy as np
 import pytesseract
@@ -715,19 +720,19 @@ def percent_to_unit(value):
     return max(0.0, min(number, 1.0))
 def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bottom_dot_offset=0):
     base = Image.open(source_path).convert("RGB")
-
-    protected_markers = [
-        item["marker"]
-        for item in marker_items
-        if (
-            "ocr-existing-label" in str(item["marker"].get("notes") or item["marker"].get("Notes") or "").strip().lower()
-            or "manual-for-existing-image" in str(item["marker"].get("notes") or item["marker"].get("Notes") or "").strip().lower()
-            or str(item["marker"].get("source") or item["marker"].get("Source") or "").strip().lower() == "existing-image"
-        )
-    ]
-
-    base = erase_existing_blue_markings(base, protected_markers)
+    # Source layout uploads are treated as clean source drawings. Do not run
+    # OCR or erase existing blue markings here; OCR was adding a large delay
+    # even when the uploaded image contained no markings. The generator now
+    # only adds the current database markers to the source image.
     image_w, image_h = base.size
+    max_working_side = 7000
+    if max(image_w, image_h) > max_working_side:
+        scale = max_working_side / float(max(image_w, image_h))
+        base = base.resize(
+            (max(1, int(round(image_w * scale))), max(1, int(round(image_h * scale)))),
+            Image.Resampling.LANCZOS,
+        )
+        image_w, image_h = base.size
 
     # Reserve enough white margin for the wider callout columns.
     estimated_column_width = max(180, min(520, int(round(image_w * 0.16))))
@@ -794,7 +799,9 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     }
     target_boxes = []
     label_h_base = column_height
-    gap = max(6, int(round(column_height * 0.25)))
+    # Keep stacked hazardous callout cells readable without creating large
+    # empty gaps. The same spacing is used for left-column overflow on right.
+    gap = 16
     line_gap = 28
     margin = 8
     collision_pad = 8
@@ -1513,23 +1520,21 @@ def make_hazard_layout_pages_from_images(images, vessel_name, company_name):
         with Image.open(image_path) as img:
             img_w, img_h = img.size
 
-        max_page_width = 1600
-        max_page_height = 1100
-        # Reserve space for the common header/footer and the first-page title.
-        # Without the title band, the image can overlap and clip the heading.
-        header_footer_space = 210
+        # Hazardous drawing pages use the normal report header/footer. Fit the
+        # uploaded drawing inside the available A3 landscape content area so
+        # it remains readable without creating an oversized PDF page.
+        page_width, page_height = landscape(A3)
+        left_margin = 45
+        right_margin = 45
+        top_content = page_height - 78
+        bottom_content = 68
+        title_space = 32 if image_index == 0 else 0
 
-        scale = min(
-            max_page_width / img_w,
-            (max_page_height - header_footer_space) / img_h,
-            1
-        )
-
+        available_w = page_width - left_margin - right_margin
+        available_h = top_content - bottom_content - title_space
+        scale = min(available_w / img_w, available_h / img_h, 1)
         draw_w = img_w * scale
         draw_h = img_h * scale
-
-        page_width = max(840, draw_w + 90)
-        page_height = max(580, draw_h + header_footer_space)
 
         packet = BytesIO()
         c = canvas.Canvas(
@@ -1541,14 +1546,14 @@ def make_hazard_layout_pages_from_images(images, vessel_name, company_name):
             c,
             vessel_name=vessel_name,
             company_name=company_name,
-            page_no_text="Page | "
+            page_no_text=str(image_index + 1)
         )
 
         if image_index == 0:
             title = "LOCATION DIAGRAM OF HAZARDOUS MATERIALS"
             title_font = TABLE_FONT_BOLD
             title_size = 12
-            title_y = page_height - 92
+            title_y = top_content - 4
             title_w = pdfmetrics.stringWidth(title, title_font, title_size)
 
             c.setFont(title_font, title_size)
@@ -1561,26 +1566,19 @@ def make_hazard_layout_pages_from_images(images, vessel_name, company_name):
                 title_y - 2
             )
 
-        usable_x = 45
-        usable_y = 75
-        usable_w = page_width - 90
-        usable_top = page_height - 125
-        usable_h = usable_top - usable_y
-
-        pdf_ready_image = make_hazard_pdf_ready_image(
-            image_path,
-            draw_w,
-            draw_h,
-            "hazard-i2-layout"
-        )
+        usable_x = left_margin
+        usable_y = bottom_content
+        usable_w = available_w
+        usable_top = top_content - title_space
+        usable_h = available_h
 
         c.drawImage(
-            str(pdf_ready_image),
-            (page_width - draw_w) / 2,
-            usable_y + (usable_h - draw_h) / 2,
+            str(image_path),
+            usable_x + (usable_w - draw_w) / 2,
+            usable_y,
             width=draw_w,
             height=draw_h,
-            preserveAspectRatio=True,
+            preserveAspectRatio=False,
             mask="auto"
         )
         print("HAZARD IMAGE PDF INSERT SUCCESS", file=sys.stderr)

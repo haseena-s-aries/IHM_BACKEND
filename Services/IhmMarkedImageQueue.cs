@@ -342,7 +342,7 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
         {
             metadata.Status = IhmMarkedImageStatus.Failed;
             metadata.RetryCount += 1;
-            metadata.ErrorMessage = ex.Message;
+            metadata.ErrorMessage = TruncateGeneratorLog(ex.ToString(), 3900);
             metadata.UpdatedAtUtc = DateTime.UtcNow;
 
             await db.SaveChangesAsync(cancellationToken);
@@ -566,8 +566,24 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
             if (Directory.Exists(userPythonPackages))
                 startInfo.Environment["PYTHONPATH"] = userPythonPackages;
 
+            _logger.LogInformation(
+                "Starting hazardous Python generator. jobId={JobId} executable={Executable} script={Script} input={Input} output={Output} pythonPath={PythonPath}",
+                item.JobId,
+                startInfo.FileName,
+                scriptPath,
+                inputJsonPath,
+                manifestPhysicalPath,
+                startInfo.Environment.TryGetValue("PYTHONPATH", out var configuredPythonPath)
+                    ? configuredPythonPath
+                    : "<none>");
+
             using var process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("Unable to start hazardous I-2 marked image generator.");
+
+            _logger.LogInformation(
+                "Hazardous Python process started. jobId={JobId} pid={ProcessId}",
+                item.JobId,
+                process.Id);
 
             var outputTask = process.StandardOutput.ReadToEndAsync();
             var errorTask = process.StandardError.ReadToEndAsync();
@@ -576,6 +592,14 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
 
             var output = await outputTask;
             var error = await errorTask;
+
+            _logger.LogInformation(
+                "Hazardous Python process exited. jobId={JobId} pid={ProcessId} exitCode={ExitCode} stdout={Stdout} stderr={Stderr}",
+                item.JobId,
+                process.Id,
+                process.ExitCode,
+                TruncateGeneratorLog(output),
+                TruncateGeneratorLog(error));
 
             if (process.ExitCode != 0)
                 throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? output : error);
@@ -615,6 +639,17 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
                 item.JobId
             );
         }
+    }
+
+    private static string TruncateGeneratorLog(string? value, int maxLength = 4000)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "<empty>";
+
+        var normalized = value.Replace(Environment.NewLine, " ").Trim();
+        return normalized.Length <= maxLength
+            ? normalized
+            : normalized[..maxLength] + " ...[truncated]";
     }
 
     private static async Task<string> BuildHazardousMarkerPayload(

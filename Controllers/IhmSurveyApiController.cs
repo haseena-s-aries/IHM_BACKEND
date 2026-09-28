@@ -1286,7 +1286,11 @@ namespace Survey_Certification_App.Controllers
 
                     Checkpoints = _db.IhmCheckpoints
                         .Where(cp => cp.IhmAreaId == area.Id)
-                        .OrderBy(cp => cp.Sample_No)
+                        // Preserve the original Excel row order for the VSCP
+                        // table. Sample_No is regenerated (S01/V01/etc.) and
+                        // must not be used as the display sort key.
+                        .OrderBy(cp => cp.SourceRowNumber ?? int.MaxValue)
+                        .ThenBy(cp => cp.Id)
                         .Select(cp => new
                         {
                             cp.Id,
@@ -2508,7 +2512,8 @@ namespace Survey_Certification_App.Controllers
                 .ToListAsync();
             var checkpointEquipmentRows = await _db.IhmCheckpoints
                 .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
-                .OrderBy(x => x.Id)
+                .OrderBy(x => x.SourceRowNumber ?? int.MaxValue)
+                .ThenBy(x => x.Id)
                 .Select(x => new
                 {
                     IhmCheckpointId = x.Id,
@@ -2525,7 +2530,8 @@ namespace Survey_Certification_App.Controllers
                 .ToListAsync();
             var ihmCheckpoints = await _db.IhmCheckpoints
                 .Where(x => x.SurveyJobId == jobId)
-                .OrderBy(x => x.Id)
+                .OrderBy(x => x.SourceRowNumber ?? int.MaxValue)
+                .ThenBy(x => x.Id)
                 .Select(x => new
                 {
                     x.Id,
@@ -2546,6 +2552,7 @@ namespace Survey_Certification_App.Controllers
                     x.CheckResult,
                     x.Remarks,
                     x.LocationRemarks,
+                    x.SourceRowNumber,
                 })
             .ToListAsync();
             var savedEquipmentRows = await _db.IhmEquipmentMachineryReportRows
@@ -2646,7 +2653,8 @@ namespace Survey_Certification_App.Controllers
                     area.SortOrder,
                     Checkpoints = _db.IhmCheckpoints
                         .Where(cp => cp.IhmAreaId == area.Id)
-                        .OrderBy(cp => cp.Sample_No)
+                        .OrderBy(cp => cp.SourceRowNumber ?? int.MaxValue)
+                        .ThenBy(cp => cp.Id)
                         .Select(cp => new
                         {
                             cp.Id,

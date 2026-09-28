@@ -105,9 +105,10 @@ def _checkpoint_photos(data, checkpoint_id):
 
 
 def _draw_wrapped_centered_text(c, text, x1, y1, x2, y2, font=FONT_TIMES, size=12):
-    lines = wrap_text_to_lines(text, font, size, x2 - x1 - 8)
+    padding = 10
+    lines = _appendix3_wrap_lines(text, font, size, max(1, x2 - x1 - (padding * 2)))
 
-    line_height = size + 2
+    line_height = max(size + 3, 15)
     total_height = len(lines) * line_height
     start_y = y1 + ((y2 - y1) + total_height) / 2 - size
 
@@ -120,9 +121,69 @@ def _draw_wrapped_centered_text(c, text, x1, y1, x2, y2, font=FONT_TIMES, size=1
         c.drawString(line_x, start_y - (index * line_height), line)
 
 
+def _appendix3_wrap_lines(value, font, size, max_width):
+    lines = []
+    for paragraph in txt(value).splitlines() or [""]:
+        words = paragraph.split() or [""]
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if not current or pdfmetrics.stringWidth(candidate, font, size) <= max_width:
+                current = candidate
+                continue
+            lines.append(current)
+            current = ""
+
+        if current:
+            # Break any remaining unbreakable word at character boundaries.
+            if pdfmetrics.stringWidth(current, font, size) <= max_width:
+                lines.append(current)
+            else:
+                chunk = ""
+                for character in current:
+                    if chunk and pdfmetrics.stringWidth(chunk + character, font, size) > max_width:
+                        lines.append(chunk)
+                        chunk = character
+                    else:
+                        chunk += character
+                if chunk:
+                    lines.append(chunk)
+    return lines or ["-"]
+
+
+def _wrapped_row_height(value, width, size=12):
+    """Return a row height that fully contains every wrapped line."""
+    padding = 10
+    line_height = max(size + 3, 15)
+    lines = _appendix3_wrap_lines(value, FONT_TIMES, size, max(1, width - (padding * 2)))
+    return max(35, (len(lines) * line_height) + (padding * 2))
+
+
+APPENDIX3_LABEL_FONT_SIZE = 10
+APPENDIX3_VALUE_FONT_SIZE = 12
+
+
 def _draw_row(c, label, value, y_top, y_bottom):
-    _draw_wrapped_centered_text(c, label, 70, y_bottom, 160, y_top, size=12)
-    _draw_wrapped_centered_text(c, value, 160, y_bottom, 520, y_top, size=12)
+    # Labels use a slightly smaller font because the left column is narrow;
+    # both label and value remain vertically and horizontally centered.
+    _draw_wrapped_centered_text(
+        c,
+        label,
+        70,
+        y_bottom,
+        160,
+        y_top,
+        size=APPENDIX3_LABEL_FONT_SIZE,
+    )
+    _draw_wrapped_centered_text(
+        c,
+        value,
+        160,
+        y_bottom,
+        520,
+        y_top,
+        size=APPENDIX3_VALUE_FONT_SIZE,
+    )
 
 def _item_description(checkpoint):
     values = [
@@ -146,13 +207,45 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
 
     y_top = 770
     y_image_bottom = 525
-    y_item = 485
-    y_hazard = 440
-    y_method = 395
-    y_result = 350
-    y_quantity = 315
-    y_quantity = 315
-    y_bottom = 280
+    item_value = _item_description(checkpoint)
+    hazard_value = checkpoint.get("hazardousMaterial")
+    method_value = _method_of_inspection(checkpoint)
+    result_label = _result_label(checkpoint)
+    result_value = _result_value(checkpoint)
+    quantity_value = _quantity_text(checkpoint)
+    remarks_value = (
+        checkpoint.get("locationRemarks")
+        or checkpoint.get("LocationRemarks")
+        or checkpoint.get("Location_Remark")
+        or "-"
+    )
+
+    value_width = x_right - x_first
+    label_width = x_first - x_left
+    y_item = y_image_bottom - max(
+        _wrapped_row_height(item_value, value_width, APPENDIX3_VALUE_FONT_SIZE),
+        _wrapped_row_height("ITEM\nDESCRIPTION", label_width, APPENDIX3_LABEL_FONT_SIZE),
+    )
+    y_hazard = y_item - max(
+        _wrapped_row_height(hazard_value, value_width, APPENDIX3_VALUE_FONT_SIZE),
+        _wrapped_row_height("HAZARDOUS\nMATERIAL\nTESTED FOR", label_width, APPENDIX3_LABEL_FONT_SIZE),
+    )
+    y_method = y_hazard - max(
+        _wrapped_row_height(method_value, value_width, APPENDIX3_VALUE_FONT_SIZE),
+        _wrapped_row_height("METHODS OF\nINSPECTION", label_width, APPENDIX3_LABEL_FONT_SIZE),
+    )
+    y_result = y_method - max(
+        _wrapped_row_height(result_label, label_width, APPENDIX3_LABEL_FONT_SIZE),
+        _wrapped_row_height(result_value, value_width, APPENDIX3_VALUE_FONT_SIZE),
+    )
+    y_quantity = y_result - max(
+        _wrapped_row_height("QUANTITY", label_width, APPENDIX3_LABEL_FONT_SIZE),
+        _wrapped_row_height(quantity_value, value_width, APPENDIX3_VALUE_FONT_SIZE),
+    )
+    y_bottom = y_quantity - max(
+        _wrapped_row_height("SITE\nREMARKS", label_width, APPENDIX3_LABEL_FONT_SIZE),
+        _wrapped_row_height(remarks_value, value_width, APPENDIX3_VALUE_FONT_SIZE),
+    )
 
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.7)
@@ -184,7 +277,7 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
     _draw_row(
     c,
     "ITEM\nDESCRIPTION",
-    _item_description(checkpoint),
+        item_value,
     y_image_bottom,
     y_item
 )
@@ -192,7 +285,7 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
     _draw_row(
         c,
         "HAZARDOUS\nMATERIAL\nTESTED FOR",
-        checkpoint.get("hazardousMaterial"),
+        hazard_value,
         y_item,
         y_hazard
     )
@@ -200,15 +293,15 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
     _draw_row(
         c,
         "METHODS OF\nINSPECTION",
-        _method_of_inspection(checkpoint),
+        method_value,
         y_hazard,
         y_method
     )
 
     _draw_row(
         c,
-        _result_label(checkpoint),
-        _result_value(checkpoint),
+        result_label,
+        result_value,
         y_method,
         y_result
     )
@@ -216,7 +309,7 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
     _draw_row(
         c,
         "QUANTITY",
-        _quantity_text(checkpoint),
+        quantity_value,
         y_result,
         y_quantity
     )
@@ -224,14 +317,20 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
     _draw_row(
         c,
         "SITE\nREMARKS",
-        checkpoint.get("locationRemarks") or checkpoint.get("LocationRemarks") or checkpoint.get("Location_Remark") or "-",
+        remarks_value,
         y_quantity,
         y_bottom
     )
 
 
 def make_appendix_three_sampling_photo_pages(page_width, page_height, data):
-    checkpoints = data.get("ihmCheckpoints") or []
+    checkpoints = list(data.get("ihmCheckpoints") or [])
+    # Keep Appendix 3 pages in the latest Excel row order. Sample_No can be
+    # regenerated (S/V prefixes), so it is not a reliable ordering key.
+    checkpoints.sort(key=lambda row: (
+        int(row.get("sourceRowNumber") or row.get("SourceRowNumber") or 2**31 - 1),
+        int(row.get("id") or row.get("Id") or 2**31 - 1),
+    ))
     vessel = data.get("vessel") or {}
     report_info = data.get("reportInfo") or {}
 

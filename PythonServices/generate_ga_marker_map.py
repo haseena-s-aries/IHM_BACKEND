@@ -241,7 +241,14 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         font = ImageFont.load_default()
 
     blue = (0, 0, 255)
+    pink = (255, 0, 128)
     white = (255, 255, 255)
+
+    def marker_color(label):
+        # Visual-check markers are pink; sampling markers remain blue.
+        # Use the generated label prefix so this also works after Excel
+        # replacement changes S01 to V01 without changing coordinates.
+        return pink if str(label or "").strip().upper().startswith("V") else blue
 
     canvas_w, canvas_h = canvas_size
     layout_x, layout_y, layout_w, layout_h = layout_box
@@ -253,8 +260,11 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
     label_h = 54
     gap = 14
     margin = 10
+    # Appendix 4 callout cells start slightly below the top edge. Keep a small
+    # readable gap between every stacked cell on both left and right columns.
+    first_label_offset = 40 if labels_outside else 0
     outside_gap = 16
-    lane_gap = label_h + gap
+    lane_gap = label_h + 16 if labels_outside else label_h + gap
     route_gap = 10
     routing_lane_gap = 28
     base_lane_offset = 30
@@ -642,7 +652,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         fallback_candidates = candidates_by_priority[-1]
         return min(fallback_candidates, key=path_length)
 
-    def draw_arrowhead(path):
+    def draw_arrowhead(path, color):
         if len(path) < 2:
             return
 
@@ -667,7 +677,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
                 (tip[0] + 5, tip[1] - direction * size),
             ]
 
-        draw.polygon(arrow, fill=blue)
+        draw.polygon(arrow, fill=color)
 
     side_groups = {"top": [], "bottom": [], "left": [], "right": []}
     for group in groups:
@@ -688,7 +698,10 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
     # Deterministic Appendix 4 arrangement: fill a vertical left margin column,
     # then continue in a vertical right margin column. This deliberately avoids
     # nearest-side placement and keeps every label outside the drawing.
-    column_capacity = max(1, int((canvas_h - (2 * margin)) // lane_gap))
+    column_capacity = max(
+        1,
+        int((canvas_h - margin - first_label_offset) // lane_gap)
+    )
 
     for group_index, group in enumerate(ordered_groups):
         group["local_bounds"] = find_local_drawing_bounds(
@@ -702,7 +715,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         side = "left" if group_index < column_capacity else "right"
         lane = group_index if side == "left" else group_index - column_capacity
         box_x = (layout_x - outside_gap - label_w) if side == "left" else (layout_right + outside_gap)
-        box_y = margin + lane * lane_gap
+        box_y = margin + first_label_offset + lane * lane_gap
         chosen_box = (box_x, box_y, box_x + label_w, box_y + label_h)
 
         target_rect = (
@@ -736,13 +749,14 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
 
     for item in placements:
         path = item["path"]
+        color = marker_color(item["label"])
 
         draw.line(
             [coord for point in path for coord in point],
-            fill=blue,
+            fill=color,
             width=2,
         )
-        draw_arrowhead(path)
+        draw_arrowhead(path, color)
 
         group = item["group"]
         dot_radius = 4
@@ -753,7 +767,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
                 group.get("draw_x", group["x"]) + dot_radius,
                 group.get("draw_y", group["y"]) + dot_radius,
             ],
-            outline=blue,
+            outline=color,
             fill=white,
             width=2,
         )
@@ -763,14 +777,15 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         label = item["label"]
         text_h = item["text_h"]
 
-        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=4)
+        color = marker_color(label)
+        draw.rectangle([x1, y1, x2, y2], outline=color, fill=white, width=4)
         text_x = x1 + max(0, (label_w - text_w) / 2)
         text_y = y1 + max(6, (label_h - text_h) / 2 - 2)
 
         draw.text(
             (text_x, text_y),
             label,
-            fill=blue,
+            fill=color,
             font=font,
         )
 def percent_to_unit(value):
@@ -974,10 +989,21 @@ def main():
         "title": "COMMON LAYOUT - MARKED CHECKPOINTS",
         "fileName": output_image.name
     }]
+    generated_source_paths = {normalized_web_path(data.get("gaLayout"))}
+
+    # Remove outputs from older runs so stale machinery pages cannot survive
+    # when the current upload has only one marked layout.
+    for old_machinery_image in output_image.parent.glob("appendix4-machinery-*.png"):
+        try:
+            old_machinery_image.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     for index, machinery in enumerate(machinery_layouts, start=1):
         machinery_layout_path = machinery.get("filePath") if isinstance(machinery, dict) else machinery
         machinery_web_path = normalized_web_path(machinery_layout_path)
+        if not machinery_web_path or machinery_web_path in generated_source_paths:
+            continue
         machinery_markers = [marker for marker in markers if machinery_web_path and marker_matches_image(marker, machinery_web_path)]
         machinery_path = resolve_web_path(machinery_layout_path)
         if not machinery_path or not machinery_path.exists() or not machinery_markers:
@@ -990,6 +1016,7 @@ def main():
             "title": "MACHINERY LAYOUT - MARKED CHECKPOINTS",
             "fileName": machinery_output.name
         })
+        generated_source_paths.add(machinery_web_path)
         print(f"APPENDIX4: machinery image saved file={index}", file=sys.stderr, flush=True)
 
     for old_area_image in output_image.parent.glob("appendix4-area-*.png"):
@@ -1029,6 +1056,10 @@ def main():
                 if not normalized_web_path(marker.get("imagePath"))
             ]
 
+        area_web_path = normalized_web_path(area_file_path)
+        if not image_markers or area_web_path in generated_source_paths:
+            continue
+
         layout_id = layout.get("id") or area_id
         area_output = output_image.parent / f"appendix4-area-{area_id}-{layout_id}.png"
         save_marked_layout(area_path, image_markers, area_output, outer_pad)
@@ -1042,6 +1073,7 @@ def main():
             ).strip() + " - MARKED CHECKPOINTS",
             "fileName": area_output.name
         })
+        generated_source_paths.add(area_web_path)
 
         placement = placement_by_area.get(area_id)
 
