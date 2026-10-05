@@ -308,6 +308,19 @@ def get_ihm_checkpoints(data):
     )
 
 
+def checkpoint_remarks(row):
+    excel_remark = get_checkpoint_text(row, "remarks", "Remarks")
+    site_remark = get_checkpoint_text(
+        row,
+        "locationRemarks",
+        "LocationRemarks",
+        "Location_Remark",
+    )
+    if excel_remark and site_remark:
+        return f"{excel_remark} ({site_remark})"
+    return excel_remark or site_remark or "-"
+
+
 def checkpoint_row_values(row):
     return [
         get_checkpoint_value(row, "sample_No", "sampleNo", "Sample_No"),
@@ -324,8 +337,7 @@ def checkpoint_row_values(row):
         get_checkpoint_value(row, "samplingCheck", "SamplingCheck"),
         get_checkpoint_value(row, "visualCheck", "VisualCheck"),
         get_checkpoint_value(row, "checkResult", "CheckResult"),
-        get_checkpoint_text(row, "remarks", "Remarks")
-        or "-",
+        checkpoint_remarks(row),
     ]
 
 

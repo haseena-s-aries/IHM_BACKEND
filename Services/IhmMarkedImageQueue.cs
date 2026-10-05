@@ -191,167 +191,180 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
 
         if (gaLayout == null)
         {
-            _logger.LogInformation("No common or area layout uploaded. Skipping Appendix 4 marked image generation. jobId={JobId}", item.JobId);
-            return;
-        }
+            gaLayout = await db.IhmSamplingPhotos
+                .Where(x => x.SurveyJobId == item.JobId &&
+                            x.IhmAreaId == null &&
+                            x.IhmCheckpointId == null &&
+                            x.Caption == "Machinery layout" &&
+                            x.AssignedAreaIds != null &&
+                            x.AssignedAreaIds != "")
+                .OrderBy(x => x.Id)
+                .FirstOrDefaultAsync(cancellationToken);
 
-        var sourcePhysicalPath = ResolveWebPath(env, gaLayout.FilePath);
-        var sourceModifiedUtc = File.Exists(sourcePhysicalPath)
-            ? File.GetLastWriteTimeUtc(sourcePhysicalPath)
-            : (DateTime?)null;
-
-        var markerPayload = await BuildAppendix4MarkerPayload(db, item.JobId, cancellationToken);
-        var markerHash = ComputeHash(markerPayload);
-
-        var metadata = await db.IhmMarkedImageMetadata.FirstOrDefaultAsync(x =>
-            x.SurveyJobId == item.JobId &&
-            x.SectionType == IhmMarkedImageSectionType.Appendix4 &&
-            x.SourceImagePath == gaLayout.FilePath,
-            cancellationToken);
-
-        if (metadata != null &&
-            !item.Force &&
-            metadata.Status == IhmMarkedImageStatus.Completed &&
-            metadata.SourceImageLastModifiedUtc == sourceModifiedUtc &&
-            metadata.MarkerDataHash == markerHash &&
-            !string.IsNullOrWhiteSpace(metadata.GeneratedImagePath) &&
-            File.Exists(ResolveWebPath(env, metadata.GeneratedImagePath)))
-        {
-            _logger.LogInformation(
-                "Marked image already current. jobId={JobId} section=Appendix4 path={Path}",
-                item.JobId,
-                metadata.GeneratedImagePath
-            );
-            return;
-        }
-
-        metadata ??= new IhmMarkedImageMetadata
-        {
-            SurveyJobId = item.JobId,
-            SectionType = IhmMarkedImageSectionType.Appendix4,
-            SourceImagePath = gaLayout.FilePath,
-            CreatedAtUtc = DateTime.UtcNow
-        };
-
-        metadata.Status = IhmMarkedImageStatus.Processing;
-        metadata.SourceImageLastModifiedUtc = sourceModifiedUtc;
-        metadata.MarkerDataHash = markerHash;
-        metadata.LastQueuedAtUtc = DateTime.UtcNow;
-        metadata.UpdatedAtUtc = DateTime.UtcNow;
-        metadata.ErrorMessage = null;
-
-        if (metadata.Id == 0)
-            db.IhmMarkedImageMetadata.Add(metadata);
-
-        await db.SaveChangesAsync(cancellationToken);
-
-        try
-        {
-            var reportFolder = Path.Combine(
-                env.WebRootPath,
-                "reports",
-                "ihm",
-                item.JobId.ToString()
-            );
-
-            var generatedFolder = Path.Combine(reportFolder, "generated-images");
-            Directory.CreateDirectory(generatedFolder);
-
-            var inputJsonPath = Path.Combine(generatedFolder, "appendix4-ga-map-input.json");
-            var placementJsonPath = Path.Combine(generatedFolder, "appendix4-ga-map-placements.json");
-            var outputImagePhysicalPath = Path.Combine(
-                generatedFolder,
-                $"appendix4-ga-marker-map-{markerHash[..16]}.png"
-            );
-
-            await File.WriteAllTextAsync(inputJsonPath, markerPayload, cancellationToken);
-
-            var scriptPath = Path.Combine(
-                env.ContentRootPath,
-                "PythonServices",
-                "generate_ga_marker_map.py"
-            );
-
-            var pythonExe = File.Exists(Path.Combine(env.ContentRootPath, ".venv", "Scripts", "python.exe"))
-                ? Path.Combine(env.ContentRootPath, ".venv", "Scripts", "python.exe")
-                : File.Exists(Path.Combine(env.ContentRootPath, "venv", "Scripts", "python.exe"))
-                    ? Path.Combine(env.ContentRootPath, "venv", "Scripts", "python.exe")
-                    : "python";
-
-            var startInfo = new ProcessStartInfo
+            if (gaLayout == null)
             {
-                FileName = pythonExe,
-                Arguments = $"\"{scriptPath}\" \"{inputJsonPath}\" \"{outputImagePhysicalPath}\" \"{placementJsonPath}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
+                _logger.LogInformation("No common or area layout uploaded. Skipping Appendix 4 marked image generation. jobId={JobId}", item.JobId);
+                return;
+            }
+
+            var sourcePhysicalPath = ResolveWebPath(env, gaLayout.FilePath);
+            var sourceModifiedUtc = File.Exists(sourcePhysicalPath)
+                ? File.GetLastWriteTimeUtc(sourcePhysicalPath)
+                : (DateTime?)null;
+
+            var markerPayload = await BuildAppendix4MarkerPayload(db, item.JobId, cancellationToken);
+            var markerHash = ComputeHash(markerPayload);
+
+            var metadata = await db.IhmMarkedImageMetadata.FirstOrDefaultAsync(x =>
+                x.SurveyJobId == item.JobId &&
+                x.SectionType == IhmMarkedImageSectionType.Appendix4 &&
+                x.SourceImagePath == gaLayout.FilePath,
+                cancellationToken);
+
+            if (metadata != null &&
+                !item.Force &&
+                metadata.Status == IhmMarkedImageStatus.Completed &&
+                metadata.SourceImageLastModifiedUtc == sourceModifiedUtc &&
+                metadata.MarkerDataHash == markerHash &&
+                !string.IsNullOrWhiteSpace(metadata.GeneratedImagePath) &&
+                File.Exists(ResolveWebPath(env, metadata.GeneratedImagePath)))
+            {
+                _logger.LogInformation(
+                    "Marked image already current. jobId={JobId} section=Appendix4 path={Path}",
+                    item.JobId,
+                    metadata.GeneratedImagePath
+                );
+                return;
+            }
+
+            metadata ??= new IhmMarkedImageMetadata
+            {
+                SurveyJobId = item.JobId,
+                SectionType = IhmMarkedImageSectionType.Appendix4,
+                SourceImagePath = gaLayout.FilePath,
+                CreatedAtUtc = DateTime.UtcNow
             };
-            var userPythonPackages = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Python", "Python314", "site-packages");
-            if (Directory.Exists(userPythonPackages))
-                startInfo.Environment["PYTHONPATH"] = userPythonPackages;
 
-            using var process = Process.Start(startInfo)
-                ?? throw new InvalidOperationException("Unable to start GA map generator.");
-
-            var outputTask = process.StandardOutput.ReadToEndAsync();
-            var errorTask = process.StandardError.ReadToEndAsync();
-
-            await process.WaitForExitAsync(cancellationToken);
-
-            var output = await outputTask;
-            var error = await errorTask;
-
-            if (process.ExitCode != 0)
-                throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? output : error);
-
-            metadata.GeneratedImagePath =
-                $"/reports/ihm/{item.JobId}/generated-images/{Path.GetFileName(outputImagePhysicalPath)}";
-            metadata.Status = IhmMarkedImageStatus.Completed;
-            metadata.GeneratedAtUtc = DateTime.UtcNow;
+            metadata.Status = IhmMarkedImageStatus.Processing;
+            metadata.SourceImageLastModifiedUtc = sourceModifiedUtc;
+            metadata.MarkerDataHash = markerHash;
+            metadata.LastQueuedAtUtc = DateTime.UtcNow;
             metadata.UpdatedAtUtc = DateTime.UtcNow;
             metadata.ErrorMessage = null;
 
+            if (metadata.Id == 0)
+                db.IhmMarkedImageMetadata.Add(metadata);
+
             await db.SaveChangesAsync(cancellationToken);
 
-            DeleteMatchingFilesExcept(
-                generatedFolder,
-                "appendix4-ga-marker-map-*.png",
-                new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            try
+            {
+                var reportFolder = Path.Combine(
+                    env.WebRootPath,
+                    "reports",
+                    "ihm",
+                    item.JobId.ToString()
+                );
+
+                var generatedFolder = Path.Combine(reportFolder, "generated-images");
+                Directory.CreateDirectory(generatedFolder);
+
+                var inputJsonPath = Path.Combine(generatedFolder, "appendix4-ga-map-input.json");
+                var placementJsonPath = Path.Combine(generatedFolder, "appendix4-ga-map-placements.json");
+                var outputImagePhysicalPath = Path.Combine(
+                    generatedFolder,
+                    $"appendix4-ga-marker-map-{markerHash[..16]}.png"
+                );
+
+                await File.WriteAllTextAsync(inputJsonPath, markerPayload, cancellationToken);
+
+                var scriptPath = Path.Combine(
+                    env.ContentRootPath,
+                    "PythonServices",
+                    "generate_ga_marker_map.py"
+                );
+
+                var pythonExe = File.Exists(Path.Combine(env.ContentRootPath, ".venv", "Scripts", "python.exe"))
+                    ? Path.Combine(env.ContentRootPath, ".venv", "Scripts", "python.exe")
+                    : File.Exists(Path.Combine(env.ContentRootPath, "venv", "Scripts", "python.exe"))
+                        ? Path.Combine(env.ContentRootPath, "venv", "Scripts", "python.exe")
+                        : "python";
+
+                var startInfo = new ProcessStartInfo
                 {
+                    FileName = pythonExe,
+                    Arguments = $"\"{scriptPath}\" \"{inputJsonPath}\" \"{outputImagePhysicalPath}\" \"{placementJsonPath}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                var userPythonPackages = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Python", "Python314", "site-packages");
+                if (Directory.Exists(userPythonPackages))
+                    startInfo.Environment["PYTHONPATH"] = userPythonPackages;
+
+                using var process = Process.Start(startInfo)
+                    ?? throw new InvalidOperationException("Unable to start GA map generator.");
+
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                var errorTask = process.StandardError.ReadToEndAsync();
+
+                await process.WaitForExitAsync(cancellationToken);
+
+                var output = await outputTask;
+                var error = await errorTask;
+
+                if (process.ExitCode != 0)
+                    throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? output : error);
+
+                metadata.GeneratedImagePath =
+                    $"/reports/ihm/{item.JobId}/generated-images/{Path.GetFileName(outputImagePhysicalPath)}";
+                metadata.Status = IhmMarkedImageStatus.Completed;
+                metadata.GeneratedAtUtc = DateTime.UtcNow;
+                metadata.UpdatedAtUtc = DateTime.UtcNow;
+                metadata.ErrorMessage = null;
+
+                await db.SaveChangesAsync(cancellationToken);
+
+                DeleteMatchingFilesExcept(
+                    generatedFolder,
+                    "appendix4-ga-marker-map-*.png",
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    {
                     Path.GetFileName(outputImagePhysicalPath)
-                }
-            );
+                    }
+                );
 
-            DeleteMatchingFilesExcept(
-                generatedFolder,
-                "appendix4-*.tmp",
-                new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            );
+                DeleteMatchingFilesExcept(
+                    generatedFolder,
+                    "appendix4-*.tmp",
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                );
 
-            _logger.LogInformation(
-                "Completed marked image generation. jobId={JobId} section=Appendix4 elapsed_ms={ElapsedMs} path={Path}",
-                item.JobId,
-                sw.ElapsedMilliseconds,
-                metadata.GeneratedImagePath
-            );
-        }
-        catch (Exception ex)
-        {
-            metadata.Status = IhmMarkedImageStatus.Failed;
-            metadata.RetryCount += 1;
-            metadata.ErrorMessage = TruncateGeneratorLog(ex.ToString(), 3900);
-            metadata.UpdatedAtUtc = DateTime.UtcNow;
+                _logger.LogInformation(
+                    "Completed marked image generation. jobId={JobId} section=Appendix4 elapsed_ms={ElapsedMs} path={Path}",
+                    item.JobId,
+                    sw.ElapsedMilliseconds,
+                    metadata.GeneratedImagePath
+                );
+            }
+            catch (Exception ex)
+            {
+                metadata.Status = IhmMarkedImageStatus.Failed;
+                metadata.RetryCount += 1;
+                metadata.ErrorMessage = TruncateGeneratorLog(ex.ToString(), 3900);
+                metadata.UpdatedAtUtc = DateTime.UtcNow;
 
-            await db.SaveChangesAsync(cancellationToken);
+                await db.SaveChangesAsync(cancellationToken);
 
-            _logger.LogError(
-                ex,
-                "Failed marked image generation. jobId={JobId} section=Appendix4",
-                item.JobId
-            );
+                _logger.LogError(
+                    ex,
+                    "Failed marked image generation. jobId={JobId} section=Appendix4",
+                    item.JobId
+                );
+            }
         }
     }
 
@@ -377,6 +390,20 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
                             x.IhmCheckpointId == null)
                 .OrderBy(x => x.IhmAreaId)
                 .ThenByDescending(x => x.UploadedAt)
+                .Select(x => x.FilePath)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
+
+        if (string.IsNullOrWhiteSpace(gaLayout))
+        {
+            gaLayout = await db.IhmSamplingPhotos
+                .Where(x => x.SurveyJobId == jobId &&
+                            x.IhmAreaId == null &&
+                            x.IhmCheckpointId == null &&
+                            x.Caption == "Machinery layout" &&
+                            x.AssignedAreaIds != null &&
+                            x.AssignedAreaIds != "")
+                .OrderBy(x => x.Id)
                 .Select(x => x.FilePath)
                 .FirstOrDefaultAsync(cancellationToken);
         }
@@ -678,6 +705,21 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
             .OrderByDescending(x => x.UploadedAt)
             .Select(x => new { x.Id, x.FilePath, x.OriginalFileName, x.AssignedAreaIds })
             .ToListAsync(cancellationToken);
+
+        var activeAreaAssignedLayout = await db.IhmSamplingPhotos
+            .Where(x => x.SurveyJobId == jobId &&
+                        x.IhmCheckpointId == null &&
+                        (x.IhmAreaId != null ||
+                         (x.Caption == "Machinery layout" &&
+                          x.AssignedAreaIds != null &&
+                          x.AssignedAreaIds != "")))
+            .OrderByDescending(x => x.UploadedAt)
+            .ThenByDescending(x => x.Id)
+            .Select(x => x.FilePath)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(activeAreaAssignedLayout))
+            gaLayout = activeAreaAssignedLayout;
         var equipmentAndMachinery = await db.IhmCheckpoints
             .Where(x => x.SurveyJobId == jobId && x.CheckResult == "Yes")
             .OrderBy(x => x.Id)

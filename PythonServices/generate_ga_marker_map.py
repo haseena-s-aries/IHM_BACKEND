@@ -235,8 +235,13 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
     if not marker_points:
         return
 
+    # Appendix 4 is rendered considerably larger in the report. Scale the
+    # callout typography with the displayed layout instead of keeping the old
+    # small fixed-size labels.
+    layout_scale = max(1.0, min(layout_box[2], layout_box[3]) / 1800.0)
+    callout_font_size = int(round(min(68, max(48, 42 * layout_scale))))
     try:
-        font = ImageFont.truetype("arialbd.ttf", 42)
+        font = ImageFont.truetype("arialbd.ttf", callout_font_size)
     except OSError:
         font = ImageFont.load_default()
 
@@ -257,7 +262,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
 
     groups = group_markers(marker_points, tolerance=3)
 
-    label_h = 54
+    label_h = max(68, int(round(callout_font_size * 1.45)))
     gap = 14
     margin = 10
     # Appendix 4 callout cells start slightly below the top edge. Keep a small
@@ -754,7 +759,7 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         draw.line(
             [coord for point in path for coord in point],
             fill=color,
-            width=2,
+            width=max(3, int(round(callout_font_size / 16))),
         )
         draw_arrowhead(path, color)
 
@@ -778,7 +783,12 @@ def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_
         text_h = item["text_h"]
 
         color = marker_color(label)
-        draw.rectangle([x1, y1, x2, y2], outline=color, fill=white, width=4)
+        draw.rectangle(
+            [x1, y1, x2, y2],
+            outline=color,
+            fill=white,
+            width=max(4, int(round(callout_font_size / 12))),
+        )
         text_x = x1 + max(0, (label_w - text_w) / 2)
         text_y = y1 + max(6, (label_h - text_h) / 2 - 2)
 
@@ -904,16 +914,29 @@ def main():
     data = json.loads(input_json.read_text(encoding="utf-8"))
     print("APPENDIX4: input loaded", file=sys.stderr, flush=True)
 
-    ga_path = resolve_web_path(
-        data.get("gaLayoutPhysicalPath") or data.get("gaLayout")
-    )
+    # Area-only uploads do not have a separate common GA file. In that case,
+    # use the first assigned area layout as the Appendix 4 base map instead of
+    # failing the whole generation.
+    area_layouts = data.get("areaLayouts") or []
+    ga_source = data.get("gaLayoutPhysicalPath") or data.get("gaLayout")
+    if not ga_source:
+        for area_layout in area_layouts:
+            candidate = area_layout.get("filePath") if isinstance(area_layout, dict) else None
+            if candidate and resolve_web_path(candidate) and resolve_web_path(candidate).exists():
+                ga_source = candidate
+                break
+
+    ga_path = resolve_web_path(ga_source)
     if not ga_path or not ga_path.exists():
         print(
-            f"GA layout image not found: {data.get('gaLayout')} "
+            f"GA/area layout image not found: {ga_source} "
             f"(resolved: {ga_path})",
             file=sys.stderr
         )
         sys.exit(1)
+
+    if not data.get("gaLayout"):
+        data["gaLayout"] = ga_source
 
     base_img = Image.open(ga_path).convert("RGB")
     print(f"APPENDIX4: GA image loaded path={ga_path}", file=sys.stderr, flush=True)
@@ -938,7 +961,6 @@ def main():
     draw = ImageDraw.Draw(ga_img)
     canvas_w, canvas_h = ga_img.size
 
-    area_layouts = data.get("areaLayouts") or []
     markers = data.get("markers") or []
     existing_placements = data.get("placements") or []
     layout_count_by_area = {}

@@ -771,7 +771,14 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     # Responsive callout sizing. Keep small source images compact and use a
     # lighter font so the label column remains readable without dominating it.
     min_dimension = min(image_w, image_h)
-    dynamic_font_size = max(18, min(34, int(round(min_dimension / 125))))
+    # Hazardous layouts are now fitted wider on the page. Keep the label text
+    # readable at that scale and let the existing wrapped-text sizing increase
+    # the cell height when required.
+    # PDF-derived layouts can have a much larger raster canvas than their
+    # final report size. A 24-42px range becomes too small after page fitting,
+    # so use a larger readable range; wrapped text sizing below expands each
+    # cell to match the selected font.
+    dynamic_font_size = max(32, min(56, int(round(min_dimension / 75))))
     # Prefer a wider, compact label column so descriptions wrap into readable
     # lines instead of producing tall one-word-per-line cells.
     column_width = max(180, min(520, int(round(image_w * 0.16))))
@@ -1524,17 +1531,21 @@ def make_hazard_layout_pages_from_images(images, vessel_name, company_name):
         # uploaded drawing inside the available A3 landscape content area so
         # it remains readable without creating an oversized PDF page.
         page_width, page_height = landscape(A3)
-        left_margin = 45
-        right_margin = 45
+        # Keep the report header/footer at the same margins as other pages.
+        # The drawing itself may use the wider page area below the header.
+        left_margin = 15
+        right_margin = 15
         top_content = page_height - 78
         bottom_content = 68
         title_space = 32 if image_index == 0 else 0
 
         available_w = page_width - left_margin - right_margin
         available_h = top_content - bottom_content - title_space
-        scale = min(available_w / img_w, available_h / img_h, 1)
-        draw_w = img_w * scale
-        draw_h = img_h * scale
+        # Fill the available drawing rectangle so narrow uploaded layouts are
+        # not displayed as a small centered image. The image remains inside
+        # the page and does not cover the header/title/footer bands.
+        draw_w = available_w
+        draw_h = available_h
 
         packet = BytesIO()
         c = canvas.Canvas(

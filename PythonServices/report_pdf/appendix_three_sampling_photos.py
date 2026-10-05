@@ -213,12 +213,6 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
     result_label = _result_label(checkpoint)
     result_value = _result_value(checkpoint)
     quantity_value = _quantity_text(checkpoint)
-    remarks_value = (
-        checkpoint.get("locationRemarks")
-        or checkpoint.get("LocationRemarks")
-        or checkpoint.get("Location_Remark")
-        or "-"
-    )
 
     value_width = x_right - x_first
     label_width = x_first - x_left
@@ -242,10 +236,9 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
         _wrapped_row_height("QUANTITY", label_width, APPENDIX3_LABEL_FONT_SIZE),
         _wrapped_row_height(quantity_value, value_width, APPENDIX3_VALUE_FONT_SIZE),
     )
-    y_bottom = y_quantity - max(
-        _wrapped_row_height("SITE\nREMARKS", label_width, APPENDIX3_LABEL_FONT_SIZE),
-        _wrapped_row_height(remarks_value, value_width, APPENDIX3_VALUE_FONT_SIZE),
-    )
+    # Appendix 3 ends after Quantity. Site remarks are shown in the Visual /
+    # Sampling Check Plan Remarks column instead of as a separate row.
+    y_bottom = y_quantity
 
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.7)
@@ -314,13 +307,6 @@ def _draw_sampling_photo_table(c, checkpoint, photos):
         y_quantity
     )
 
-    _draw_row(
-        c,
-        "SITE\nREMARKS",
-        remarks_value,
-        y_quantity,
-        y_bottom
-    )
 
 
 def make_appendix_three_sampling_photo_pages(page_width, page_height, data):
