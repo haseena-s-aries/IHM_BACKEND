@@ -771,6 +771,7 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     # Responsive callout sizing. Keep small source images compact and use a
     # lighter font so the label column remains readable without dominating it.
     min_dimension = min(image_w, image_h)
+    max_dimension = max(image_w, image_h)
     # Hazardous layouts are now fitted wider on the page. Keep the label text
     # readable at that scale and let the existing wrapped-text sizing increase
     # the cell height when required.
@@ -778,7 +779,10 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
     # final report size. A 24-42px range becomes too small after page fitting,
     # so use a larger readable range; wrapped text sizing below expands each
     # cell to match the selected font.
-    dynamic_font_size = max(32, min(56, int(round(min_dimension / 75))))
+    dynamic_font_size = max(
+        36,
+        min(86, int(round(max(min_dimension / 60, max_dimension / 45))))
+    )
     # Prefer a wider, compact label column so descriptions wrap into readable
     # lines instead of producing tall one-word-per-line cells.
     column_width = max(180, min(520, int(round(image_w * 0.16))))
@@ -1234,19 +1238,23 @@ def draw_hazard_marked_layout_image(source_path, marker_items, output_path, bott
         y = item["y"]
         path = item["path"]
 
-        draw.line([coord for point in path for coord in point], fill=blue, width=3)
+        draw.line(
+            [coord for point in path for coord in point],
+            fill=blue,
+            width=4,
+        )
 
         dot_radius = 4
         draw.ellipse(
             [x - dot_radius, y - dot_radius, x + dot_radius, y + dot_radius],
             outline=blue,
             fill=white,
-            width=2,
+            width=3,
         )
 
     for item in placements:
         x1, y1, x2, y2 = item["box"]
-        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=4)
+        draw.rectangle([x1, y1, x2, y2], outline=blue, fill=white, width=5)
 
         line_h = max(dynamic_font_size + 4, int(round(dynamic_font_size * 1.25)))
         total_text_h = len(item["lines"]) * line_h
@@ -1957,11 +1965,46 @@ def draw_paginated_table(
     row_index = 0
     display_rows = rows if rows else [None]
 
+    table_specs = {
+        draw_paint_table: (get_paint_row_values, [42, 155, 165, 115, 250, 75, 75, 173], 31 + 22),
+        draw_equipment_table: (get_equipment_row_values, [42, 195, 170, 190, 115, 78, 70, 78, 112], 31 + 22),
+        draw_structure_table: (get_structure_row_values, [42, 240, 160, 270, 115, 120, 103], 35),
+    }
+
     while row_index < len(display_rows):
         section_space = 18 if first_section else 0
-        available_height = y - CONTENT_BOTTOM_Y - section_space - SECTION_LABEL_GAP - header_h
+        # Leave only a small visual gap above the footer boundary. Rows that
+        # do not fit this remaining space continue on the next page.
+        available_height = y - CONTENT_BOTTOM_Y - section_space - SECTION_LABEL_GAP - 2
+        value_builder, col_widths, measured_header_h = table_specs[draw_table_func]
 
-        max_rows = int(available_height // row_h)
+        # Measure the real wrapped height of every row before selecting the
+        # page chunk. The old fixed row_h estimate allowed long text rows to
+        # cross the footer or overlap the next page.
+        measured_heights = [
+            calculate_row_height(
+                value_builder(row, index),
+                col_widths,
+                min_height=25,
+                font=TABLE_FONT,
+                size=12,
+            )
+            for index, row in enumerate(display_rows, start=1)
+        ]
+
+        max_rows = 0
+        used_height = measured_header_h
+        for offset in range(row_index, len(display_rows)):
+            next_height = used_height + measured_heights[offset]
+            if max_rows > 0 and next_height > available_height:
+                break
+            if max_rows == 0 and next_height > available_height:
+                # A single unusually tall row must still be rendered; it will
+                # be handled by the table's normal wrapped layout.
+                max_rows = 1
+                break
+            used_height = next_height
+            max_rows += 1
 
         if max_rows <= 0:
             c.showPage()
