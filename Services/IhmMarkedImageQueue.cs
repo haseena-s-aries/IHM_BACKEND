@@ -309,12 +309,36 @@ public class IhmMarkedImageQueue : BackgroundService, IIhmMarkedImageQueue
                     ?? throw new InvalidOperationException("Unable to start GA map generator.");
 
                 var outputTask = process.StandardOutput.ReadToEndAsync();
-                var errorTask = process.StandardError.ReadToEndAsync();
+                var errorBuilder = new StringBuilder();
+                process.ErrorDataReceived += (_, args) =>
+                {
+                    if (args.Data == null)
+                        return;
+
+                    errorBuilder.AppendLine(args.Data);
+                    _logger.LogInformation(
+                        "Appendix4 Python log. jobId={JobId} {Line}",
+                        item.JobId,
+                        args.Data
+                    );
+                };
+                process.BeginErrorReadLine();
 
                 await process.WaitForExitAsync(cancellationToken);
+                process.WaitForExit();
 
                 var output = await outputTask;
-                var error = await errorTask;
+                var error = errorBuilder.ToString();
+
+                if (!string.IsNullOrWhiteSpace(output) || !string.IsNullOrWhiteSpace(error))
+                {
+                    _logger.LogInformation(
+                        "Appendix4 Python diagnostic output. jobId={JobId} stdout={Stdout} stderr={Stderr}",
+                        item.JobId,
+                        TruncateGeneratorLog(output),
+                        TruncateGeneratorLog(error)
+                    );
+                }
 
                 if (process.ExitCode != 0)
                     throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? output : error);

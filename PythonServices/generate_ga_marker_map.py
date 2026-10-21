@@ -1,4 +1,7 @@
 import json
+from itertools import pairwise
+import time
+from collections import Counter
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -9,6 +12,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 Image.MAX_IMAGE_PIXELS = None
 MIN_AUTO_MATCH_CONFIDENCE = 0.55
+
+
+# Diagnostic-only timers. Keep placement order, routing, and image pixels unchanged.
+def timing_log(event, **fields):
+    suffix = " ".join(f"{key}={value}" for key, value in fields.items())
+    print(f"APPENDIX4_TIMING {event} {suffix}", file=sys.stderr, flush=True)
+
 
 
 def resolve_web_path(web_path):
@@ -231,573 +241,466 @@ def group_markers(marker_points, tolerance=6):
     return groups
 
 
-def draw_callout_markers(draw, marker_points, layout_box, canvas_size, obstacle_rects=None, content_integral=None, labels_outside=False):
+def draw_callout_markers(draw, marker_points, layout_box, canvas_size,
+                         obstacle_rects=None, content_integral=None,
+                         labels_outside=False):
+    """Collision-aware joint label placement and orthogonal leader routing.
+
+    Target (draw_x/draw_y) is immutable. A candidate consists of BOTH its
+    label rectangle and complete leader polyline; no candidate is committed
+    until the pair passes the collision tests.
+    """
     if not marker_points:
         return
 
-    # Appendix 4 is rendered considerably larger in the report. Scale the
-    # callout typography with the displayed layout instead of keeping the old
-    # small fixed-size labels.
-    layout_scale = max(1.0, min(layout_box[2], layout_box[3]) / 1800.0)
-    callout_font_size = int(round(min(68, max(48, 42 * layout_scale))))
-    try:
-        font = ImageFont.truetype("arialbd.ttf", callout_font_size)
-    except OSError:
-        font = ImageFont.load_default()
-
-    blue = (0, 0, 255)
-    pink = (255, 0, 128)
-    white = (255, 255, 255)
-
-    def marker_color(label):
-        # Visual-check markers are pink; sampling markers remain blue.
-        # Use the generated label prefix so this also works after Excel
-        # replacement changes S01 to V01 without changing coordinates.
-        return pink if str(label or "").strip().upper().startswith("V") else blue
-
-    canvas_w, canvas_h = canvas_size
+    t_callout = time.perf_counter()
+    timing_log("callout_start", markers=len(marker_points), canvas=canvas_size)
     layout_x, layout_y, layout_w, layout_h = layout_box
-    layout_right = layout_x + layout_w
-    layout_bottom = layout_y + layout_h
+    canvas_w, canvas_h = canvas_size
+    font_size = int(round(min(68, max(48, 42 * max(
+        1.0, min(layout_w, layout_h) / 1800.0)))))
+    # Regular weight, preserving the existing font size.
+    # Prefer Arial Regular on Windows; use a regular-weight fallback elsewhere.
+    font = None
+    for font_name in ("arial.ttf", "LiberationSans-Regular.ttf", "DejaVuSans.ttf"):
+        try:
+            font = ImageFont.truetype(font_name, font_size)
+            break
+        except OSError:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    label_h = max(68, int(round(font_size * 1.45)))
+    gap = max(24, int(font_size * 0.55))  # Clear separation between label cells
+    route_clearance = max(9, int(font_size * 0.18))
+    preferred_leader = max(125, int(font_size * 2.7))
+    min_leader = max(90, int(font_size * 1.9))
+    blue, pink, white = (0, 0, 255), (255, 0, 128), (255, 255, 255)
+    obstacles = obstacle_rects or []
 
-    groups = group_markers(marker_points, tolerance=3)
+    def color_for(label):
+        return pink if label.strip().upper().startswith("V") else blue
 
-    label_h = max(68, int(round(callout_font_size * 1.45)))
-    gap = 14
-    margin = 10
-    # Appendix 4 callout cells start slightly below the top edge. Keep a small
-    # readable gap between every stacked cell on both left and right columns.
-    first_label_offset = 40 if labels_outside else 0
-    outside_gap = 16
-    lane_gap = label_h + 16 if labels_outside else label_h + gap
-    route_gap = 10
-    routing_lane_gap = 28
-    base_lane_offset = 30
-    collision_pad = 8
-    preferred_length = max(45, min(min(layout_w, layout_h) * 0.07, 140))
+    def intersects(a, b, clearance=0):
+        return not (a[2] + clearance <= b[0] or b[2] + clearance <= a[0]
+                    or a[3] + clearance <= b[1] or b[3] + clearance <= a[1])
 
-    placements = []
-    used_boxes = []
-    existing_segments = []
-    reserved_bend_points = set()
-    target_boxes = []
-    obstacle_rects = obstacle_rects or []
+    def expanded(box, d):
+        return (box[0]-d, box[1]-d, box[2]+d, box[3]+d)
 
-    for group in groups:
-        target_boxes.append((
-            group.get("draw_x", group["x"]) - 9,
-            group.get("draw_y", group["y"]) - 9,
-            group.get("draw_x", group["x"]) + 9,
-            group.get("draw_y", group["y"]) + 9,
-        ))
+    def segment_rectangle(a, b, pad=0):
+        return (min(a[0], b[0])-pad, min(a[1], b[1])-pad,
+                max(a[0], b[0])+pad, max(a[1], b[1])+pad)
 
-    def boxes_overlap(a, b, pad=gap):
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        return not (
-            ax2 + pad < bx1 or
-            ax1 - pad > bx2 or
-            ay2 + pad < by1 or
-            ay1 - pad > by2
-        )
+    def simplify(path):
+        out = []
+        for p in path:
+            if not out or abs(p[0]-out[-1][0]) > 0.01 or abs(p[1]-out[-1][1]) > 0.01:
+                out.append(p)
+        i = 1
+        while i < len(out)-1:
+            a, b, c = out[i-1:i+2]
+            if (abs(a[0]-b[0]) < 0.01 and abs(b[0]-c[0]) < 0.01) or \
+               (abs(a[1]-b[1]) < 0.01 and abs(b[1]-c[1]) < 0.01):
+                out.pop(i)
+            else:
+                i += 1
+        return out
 
-    def has_overlap(box):
-        return any(boxes_overlap(box, old_box) for old_box in used_boxes)
+    def segments(path):
+        # Stream adjacent segments without allocating a new list/slice for
+        # every collision test. Iteration order and geometry are unchanged.
+        return pairwise(path)
 
-    def clean_box(box):
-        if content_integral is None:
+    def is_axis_aligned(a, b):
+        return abs(a[0]-b[0]) < 0.01 or abs(a[1]-b[1]) < 0.01
+
+    def path_hits_rectangle(path, rect, pad=route_clearance):
+        return any(intersects(segment_rectangle(a,b,pad), rect) for a,b in segments(path))
+
+    def segment_collision(ab, cd, clearance=route_clearance):
+        # Expanded bounding boxes correctly detect crossings, shared trunks
+        # and orthogonal leaders that pass too close to one another.
+        return intersects(segment_rectangle(*ab, clearance),
+                          segment_rectangle(*cd, 0))
+
+    # Accurate geometry for diagonal segments: a bounding rectangle alone
+    # incorrectly classifies many diagonal paths as colliding.
+    def point_segment_distance(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        denom = dx * dx + dy * dy
+        t = 0.0 if denom < 1e-9 else max(0.0, min(1.0,
+            ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / denom))
+        return ((p[0]-a[0]-t*dx)**2 + (p[1]-a[1]-t*dy)**2)**0.5
+
+    def cross(a, b, c):
+        return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
+
+    def lines_intersect(a, b, c, d):
+        eps = 1e-7
+        o1, o2, o3, o4 = cross(a,b,c),cross(a,b,d),cross(c,d,a),cross(c,d,b)
+        if ((o1>eps and o2<-eps) or (o1<-eps and o2>eps)) and ((o3>eps and o4<-eps) or (o3<-eps and o4>eps)):
             return True
-        padded = (box[0] - 8, box[1] - 8, box[2] + 8, box[3] + 8)
-        return rect_content_ratio(padded, content_integral, canvas_w, canvas_h) <= 0.04
+        return (abs(o1)<=eps and point_segment_distance(c,a,b)<=eps or
+                abs(o2)<=eps and point_segment_distance(d,a,b)<=eps or
+                abs(o3)<=eps and point_segment_distance(a,c,d)<=eps or
+                abs(o4)<=eps and point_segment_distance(b,c,d)<=eps)
 
-    def segment_box(segment):
-        (x1, y1), (x2, y2) = segment
-        return (
-            min(x1, x2) - collision_pad,
-            min(y1, y2) - collision_pad,
-            max(x1, x2) + collision_pad,
-            max(y1, y2) + collision_pad,
-        )
-
-    def segment_hits_rect(segment, rect, allow_target=False):
-        if allow_target:
+    def precise_segment_collision(ab, cd, clearance=route_clearance):
+        (a,b),(c,d)=ab,cd
+        # Equivalent bounding-box precheck; no temporary rectangles allocated.
+        if (max(a[0],b[0])+clearance <= min(c[0],d[0]) or
+            max(c[0],d[0]) <= min(a[0],b[0])-clearance or
+            max(a[1],b[1])+clearance <= min(c[1],d[1]) or
+            max(c[1],d[1]) <= min(a[1],b[1])-clearance):
             return False
+        if lines_intersect(a,b,c,d):
+            return True
+        return (point_segment_distance(a,c,d) < clearance or
+                point_segment_distance(b,c,d) < clearance or
+                point_segment_distance(c,a,b) < clearance or
+                point_segment_distance(d,a,b) < clearance)
 
-        (x1, y1), (x2, y2) = segment
-        rx1, ry1, rx2, ry2 = rect
-        rx1 -= collision_pad
-        ry1 -= collision_pad
-        rx2 += collision_pad
-        ry2 += collision_pad
-
-        if abs(x1 - x2) < 0.1:
-            return rx1 <= x1 <= rx2 and not (max(y1, y2) < ry1 or min(y1, y2) > ry2)
-
-        if abs(y1 - y2) < 0.1:
-            return ry1 <= y1 <= ry2 and not (max(x1, x2) < rx1 or min(x1, x2) > rx2)
-
-        return boxes_overlap(segment_box(segment), (rx1, ry1, rx2, ry2), pad=0)
-
-    def segments_touch_or_overlap(a, b, tolerance=10):
-        ax1, ay1 = a[0]
-        ax2, ay2 = a[1]
-        bx1, by1 = b[0]
-        bx2, by2 = b[1]
-
-        a_vertical = abs(ax1 - ax2) < 0.1
-        b_vertical = abs(bx1 - bx2) < 0.1
-        a_horizontal = abs(ay1 - ay2) < 0.1
-        b_horizontal = abs(by1 - by2) < 0.1
-
-        if a_vertical and b_vertical and abs(ax1 - bx1) <= tolerance:
-            return not (
-                max(ay1, ay2) < min(by1, by2) - tolerance or
-                min(ay1, ay2) > max(by1, by2) + tolerance
-            )
-
-        if a_horizontal and b_horizontal and abs(ay1 - by1) <= tolerance:
-            return not (
-                max(ax1, ax2) < min(bx1, bx2) - tolerance or
-                min(ax1, ax2) > max(bx1, bx2) + tolerance
-            )
-
+    def precise_path_hits_rectangle(path, rect, pad=route_clearance):
+        x1,y1,x2,y2 = expanded(rect,pad)
+        # Construct the four immutable edges once per call, avoiding tuple slicing
+        # and zip/list construction for every segment of the leader.
+        tl=(x1,y1); tr=(x2,y1); br=(x2,y2); bl=(x1,y2)
+        for a,b in segments(path):
+            if (max(a[0],b[0]) <= x1 or min(a[0],b[0]) >= x2 or
+                max(a[1],b[1]) <= y1 or min(a[1],b[1]) >= y2):
+                continue
+            if (x1<=a[0]<=x2 and y1<=a[1]<=y2) or (x1<=b[0]<=x2 and y1<=b[1]<=y2):
+                return True
+            if (lines_intersect(a,b,tl,tr) or lines_intersect(a,b,tr,br) or
+                lines_intersect(a,b,br,bl) or lines_intersect(a,b,bl,tl)):
+                return True
         return False
 
-
-    def segments_cross(a, b):
-        ax1, ay1 = a[0]
-        ax2, ay2 = a[1]
-        bx1, by1 = b[0]
-        bx2, by2 = b[1]
-        if any((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 <= collision_pad ** 2 for p in a for q in b):
-            return True
-
-        a_vertical = abs(ax1 - ax2) < 0.1
-        b_vertical = abs(bx1 - bx2) < 0.1
-        a_horizontal = abs(ay1 - ay2) < 0.1
-        b_horizontal = abs(by1 - by2) < 0.1
-
-        if a_vertical and b_horizontal:
-            return min(bx1, bx2) <= ax1 <= max(bx1, bx2) and min(ay1, ay2) <= by1 <= max(ay1, ay2)
-
-        if a_horizontal and b_vertical:
-            return min(ax1, ax2) <= bx1 <= max(ax1, ax2) and min(by1, by2) <= ay1 <= max(by1, by2)
-
-        if a_vertical and b_vertical and abs(ax1 - bx1) < collision_pad:
-            return not (max(ay1, ay2) < min(by1, by2) or min(ay1, ay2) > max(by1, by2))
-
-        if a_horizontal and b_horizontal and abs(ay1 - by1) < collision_pad:
-            return not (max(ax1, ax2) < min(bx1, bx2) or min(ax1, ax2) > max(bx1, bx2))
-
-        return False
-
-    def path_segments(path):
-        return list(zip(path, path[1:]))
-
-    def rect_contains_point(rect, point):
-        x1, y1, x2, y2 = rect
-        x, y = point
-        return x1 <= x <= x2 and y1 <= y <= y2
-
-    def bend_key(point):
-        return (round(point[0] / 4), round(point[1] / 4))
-
-    def marker_side(group):
-        local_left, local_top, local_right, local_bottom = group.get("local_bounds", (layout_x, layout_y, layout_right, layout_bottom))
-        dist_top = group["y"] - local_top
-        dist_bottom = local_bottom - group["y"]
-        dist_left = group["x"] - local_left
-        dist_right = local_right - group["x"]
-
-        distances = [
-            ("top", dist_top),
-            ("bottom", dist_bottom),
-            ("left", dist_left),
-            ("right", dist_right),
-        ]
-        return min(distances, key=lambda item: item[1])[0]
-
-    def label_box_for_side(group, label_w, side, lane):
-        target_x = group.get("draw_x", group["x"])
-        target_y = group.get("draw_y", group["y"])
-        local_left, local_top, local_right, local_bottom = group.get("local_bounds", (layout_x, layout_y, layout_right, layout_bottom))
-        if side == "top":
-            box_x = target_x - label_w / 2
-            box_y = (layout_y - outside_gap - label_h if labels_outside else target_y - preferred_length - label_h) - (lane * lane_gap)
-        elif side == "bottom":
-            box_x = target_x - label_w / 2
-            box_y = (layout_bottom + outside_gap if labels_outside else target_y + preferred_length) + (lane * lane_gap)
-        elif side == "left":
-            box_x = (layout_x - outside_gap - label_w if labels_outside else target_x - preferred_length - label_w) - (lane * (label_w + gap))
-            box_y = target_y - label_h / 2
-        else:
-            box_x = (layout_right + outside_gap if labels_outside else target_x + preferred_length) + (lane * (label_w + gap))
-            box_y = target_y - label_h / 2
-
-        box_x = max(margin, min(box_x, canvas_w - label_w - margin))
-        box_y = max(margin, min(box_y, canvas_h - label_h - margin))
-        box = (box_x, box_y, box_x + label_w, box_y + label_h)
-        return box
-
-    def label_anchor(box, side):
-        x1, y1, x2, y2 = box
-        if side == "top":
-            return ((x1 + x2) / 2, y2)
-        if side == "bottom":
-            return ((x1 + x2) / 2, y1)
-        if side == "left":
-            return (x2, (y1 + y2) / 2)
-        return (x1, (y1 + y2) / 2)
-
-    def target_point(group, side):
-        x = group.get("draw_x", group["x"])
-        y = group.get("draw_y", group["y"])
-        if side == "top":
-            return (x, max(layout_y, y - 1))
-        if side == "bottom":
-            return (x, min(layout_bottom, y + 1))
-        if side == "left":
-            return (max(layout_x, x - 1), y)
-        return (min(layout_right, x + 1), y)
-
-    def path_score(path, target_rect):
-        hard_collisions = 0
-        soft_score = 0
-        segments = path_segments(path)
-        target = path[-1]
-
-        for segment in segments:
-            soft_score += abs(segment[0][0] - segment[1][0]) + abs(segment[0][1] - segment[1][1])
-
-            for box in used_boxes:
-                if segment_hits_rect(segment, box):
-                    hard_collisions += 1
-
-            for other_target in target_boxes:
-                if other_target != target_rect and segment_hits_rect(segment, other_target):
-                    hard_collisions += 1
-
-            for obstacle_rect in obstacle_rects:
-                # The selected marker may be inside its own compartment. Allow
-                # the final connection to enter only that target compartment.
-                if rect_contains_point(obstacle_rect, target):
-                    continue
-                if segment_hits_rect(segment, obstacle_rect):
-                    hard_collisions += 1
-
-            for existing in existing_segments:
-                if segments_touch_or_overlap(segment, existing):
-                    hard_collisions += 1
-                elif segments_cross(segment, existing):
-                    hard_collisions += 1
-
-        bends = max(0, len(path) - 2)
-        for point in path[1:-1]:
-            if bend_key(point) in reserved_bend_points:
-                hard_collisions += 1
-
-        soft_score += bends * 300
-
-        return hard_collisions, soft_score
-
-    def choose_route(candidates, target_rect):
-        scored = [
-            (path_score(candidate, target_rect), candidate)
-            for candidate in candidates
-            if len(candidate) >= 2
-        ]
-        clear = [item for item in scored if item[0][0] == 0]
-
-        if clear:
-            return min(clear, key=lambda item: item[0][1])[1]
-
-        return min(scored, key=lambda item: (item[0][0], item[0][1]))[1]
-
-    def route_path(anchor, target, side, target_rect, route_index=0):
-        def path_has_collision(path):
-            for segment in path_segments(path):
-                for box in used_boxes:
-                    if segment_hits_rect(segment, box):
-                        return True
-
-                for other_target in target_boxes:
-                    if other_target != target_rect and segment_hits_rect(segment, other_target):
-                        return True
-
-                for obstacle_rect in obstacle_rects:
-                    # Allow only the final target point to enter its own cell.
-                    if rect_contains_point(obstacle_rect, target):
-                        continue
-
-                    if segment_hits_rect(segment, obstacle_rect):
-                        return True
-
-                for existing in existing_segments:
-                    if segments_touch_or_overlap(segment, existing, tolerance=14):
-                        return True
-                    if segments_cross(segment, existing):
-                        return True
-
-            for bend in path[1:-1]:
-                if bend_key(bend) in reserved_bend_points:
-                    return True
-
-            return False
-
-        def path_length(path):
-            total = 0
-            for p1, p2 in path_segments(path):
-                total += abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
-            return total + (max(0, len(path) - 2) * 80)
-
-        candidates_by_priority = []
-
-        # Give every left/right callout its own vertical routing lane. Without
-        # this, labels with different Y positions can collapse onto one shared
-        # vertical segment near the margin.
-        if side in ("left", "right"):
-            # Keep the lane on the drawing-facing side of the label column.
-            # Every callout gets a different X lane, so no common trunk can form.
-            # Short horizontal exit from the cell, followed by an independent
-            # angled leader to the exact target. No shared trunk is used.
-            direction = 1 if side == "left" else -1
-            short_exit_x = anchor[0] + direction * (base_lane_offset + route_index * routing_lane_gap)
-            return [anchor, (short_exit_x, anchor[1]), target]
-
-        # Priority 1: direct straight line only if truly aligned.
-        direct_candidates = []
-        if side in ("top", "bottom") and abs(anchor[0] - target[0]) < 1:
-            direct_candidates.append([anchor, target])
-        elif side in ("left", "right") and abs(anchor[1] - target[1]) < 1:
-            direct_candidates.append([anchor, target])
-
-        candidates_by_priority.append(direct_candidates)
-
-        # Priority 2: one-bend L route.
-        if side in ("top", "bottom"):
-            candidates_by_priority.append([
-                [anchor, (anchor[0], target[1]), target],
-                [anchor, (target[0], anchor[1]), target],
-            ])
-        else:
-            candidates_by_priority.append([
-                [anchor, (target[0], anchor[1]), target],
-                [anchor, (anchor[0], target[1]), target],
-            ])
-
-        # Priority 3 and 4: route through blank lanes using horizontal offset.
-        if side in ("top", "bottom"):
-            outside_step = -route_gap if side == "top" else route_gap
-            outside_y = layout_y - route_gap if side == "top" else layout_bottom + route_gap
-
-            lane_candidates = []
-            for offset in (12, -12, 22, -22, 34, -34, 46, -46):
-                lane_x = target[0] + offset
-                lane_x = max(layout_x - outside_gap, min(lane_x, layout_right + outside_gap))
-
-                # 7-shape: small vertical from label, horizontal to blank lane,
-                # then vertical to target. This separates close vertical lines.
-                lane_candidates.append([
-                    anchor,
-                    (anchor[0], anchor[1] + outside_step),
-                    (lane_x, anchor[1] + outside_step),
-                    (lane_x, target[1]),
-                    target,
-                ])
-
-                # Wider outside lane fallback.
-                lane_candidates.append([
-                    anchor,
-                    (anchor[0], outside_y),
-                    (lane_x, outside_y),
-                    (lane_x, target[1]),
-                    target,
-                ])
-
-            candidates_by_priority.append(lane_candidates)
-
-        else:
-            outside_step = -route_gap if side == "left" else route_gap
-            outside_x = layout_x - route_gap if side == "left" else layout_right + route_gap
-
-            lane_candidates = []
-            for offset in (12, -12, 22, -22, 34, -34, 46, -46):
-                lane_y = target[1] + offset
-                lane_y = max(layout_y - outside_gap, min(lane_y, layout_bottom + outside_gap))
-
-                lane_candidates.append([
-                    anchor,
-                    (anchor[0] + outside_step, anchor[1]),
-                    (anchor[0] + outside_step, lane_y),
-                    (target[0], lane_y),
-                    target,
-                ])
-
-                lane_candidates.append([
-                    anchor,
-                    (outside_x, anchor[1]),
-                    (outside_x, lane_y),
-                    (target[0], lane_y),
-                    target,
-                ])
-
-            candidates_by_priority.append(lane_candidates)
-
-        # Accept first priority group that has zero collision.
-        for candidates in candidates_by_priority:
-            safe_candidates = [
-                path for path in candidates
-                if not path_has_collision(path)
-            ]
-
-            if safe_candidates:
-                return min(safe_candidates, key=path_length)
-
-        # Last fallback: choose shortest offset route, not straight.
-        fallback_candidates = candidates_by_priority[-1]
-        return min(fallback_candidates, key=path_length)
-
-    def draw_arrowhead(path, color):
-        if len(path) < 2:
-            return
-
-        tip = path[-1]
-        prev = path[-2]
-        dx = tip[0] - prev[0]
-        dy = tip[1] - prev[1]
-
-        size = 8
-        if abs(dx) > abs(dy):
-            direction = 1 if dx > 0 else -1
-            arrow = [
-                tip,
-                (tip[0] - direction * size, tip[1] - 5),
-                (tip[0] - direction * size, tip[1] + 5),
-            ]
-        else:
-            direction = 1 if dy > 0 else -1
-            arrow = [
-                tip,
-                (tip[0] - 5, tip[1] - direction * size),
-                (tip[0] + 5, tip[1] - direction * size),
-            ]
-
-        draw.polygon(arrow, fill=color)
-
-    side_groups = {"top": [], "bottom": [], "left": [], "right": []}
+    marker_tolerance = max(24, min(72, int(round(min(layout_w, layout_h)*0.018))))
+    # Group only labels of the same marking type. The original code grouped
+    # S20/S22/V03 and then colored the entire combined cell blue.
+    typed_points = {}
+    for point in marker_points:
+        marker_label = str(point.get("label", "")).strip().upper()
+        marker_type = "V" if marker_label.startswith("V") else (
+            "S" if marker_label.startswith("S") else marker_label[:1])
+        typed_points.setdefault(marker_type, []).append(point)
+    groups = []
+    for same_type_points in typed_points.values():
+        groups.extend(group_markers(same_type_points, tolerance=marker_tolerance))
+    records = []
     for group in groups:
-        side_groups[marker_side(group)].append(group)
-
-    side_groups["top"].sort(key=lambda g: g["x"])
-    side_groups["bottom"].sort(key=lambda g: g["x"])
-    side_groups["left"].sort(key=lambda g: g["y"])
-    side_groups["right"].sort(key=lambda g: g["y"])
-
-    ordered_groups = (
-        side_groups["top"] +
-        side_groups["bottom"] +
-        side_groups["left"] +
-        side_groups["right"]
-    )
-
-    # Deterministic Appendix 4 arrangement: fill a vertical left margin column,
-    # then continue in a vertical right margin column. This deliberately avoids
-    # nearest-side placement and keeps every label outside the drawing.
-    column_capacity = max(
-        1,
-        int((canvas_h - margin - first_label_offset) // lane_gap)
-    )
-
-    for group_index, group in enumerate(ordered_groups):
-        group["local_bounds"] = find_local_drawing_bounds(
-            content_integral,
-            (group["x"], group["y"]),
-            (layout_x, layout_y, layout_w, layout_h)
-        ) if content_integral is not None else (layout_x, layout_y, layout_right, layout_bottom)
+        x, y = group.get("draw_x", group["x"]), group.get("draw_y", group["y"])
         label = ", ".join(group["labels"])
         text_w, text_h = text_size(draw, label, font)
-        label_w = max(110, text_w + 28)
-        side = "left" if group_index < column_capacity else "right"
-        lane = group_index if side == "left" else group_index - column_capacity
-        box_x = (layout_x - outside_gap - label_w) if side == "left" else (layout_right + outside_gap)
-        box_y = margin + first_label_offset + lane * lane_gap
-        chosen_box = (box_x, box_y, box_x + label_w, box_y + label_h)
+        width = max(110, text_w + 28)
+        records.append({"group": group, "target": (x,y), "label": label,
+                        "text_w": text_w, "text_h": text_h, "width": width,
+                        "target_box": (x-6,y-6,x+6,y+6)})
+    targets = [r["target_box"] for r in records]
+    timing_log("groups_ready", groups=len(records), seconds=f"{time.perf_counter()-t_callout:.3f}")
 
-        target_rect = (
-            group.get("draw_x", group["x"]) - 9,
-            group.get("draw_y", group["y"]) - 9,
-            group.get("draw_x", group["x"]) + 9,
-            group.get("draw_y", group["y"]) + 9,
+    def candidate_boxes(r):
+        x, y = r["target"]
+        w = r["width"]
+        layout_right = layout_x + layout_w
+        layout_bottom = layout_y + layout_h
+        margin = 8
+        outside_gap = 10
+        # Always place labels in the white outer gutter, never on top of the image.
+        # Order candidate sides by nearness to the target so maximum line length stays small.
+        side_order = sorted(
+            ("top", "bottom", "left", "right"),
+            key=lambda side: {
+                "top": abs(y - layout_y),
+                "bottom": abs(layout_bottom - y),
+                "left": abs(x - layout_x),
+                "right": abs(layout_right - x),
+            }[side]
         )
-        anchor = label_anchor(chosen_box, side)
-        # Terminate at the stored marker coordinate itself. Only label placement
-        # and leader routing are changed.
-        target = (
-            group.get("draw_x", group["x"]),
-            group.get("draw_y", group["y"])
-        )
-        chosen_path = route_path(anchor, target, side, target_rect, group_index)
+        # Prefer near-target positions first, then expand outward/sideways only as needed.
+        lane_offsets = list(range(16))
+        row_gap = label_h + gap
+        col_gap = w + gap
+        slide_offsets = [0, -w * 0.70, w * 0.70, -w * 1.35, w * 1.35, -w * 2.05, w * 2.05]
+        options = []
 
-        used_boxes.append(chosen_box)
-        existing_segments.extend(path_segments(chosen_path))
-        for bend in chosen_path[1:-1]:
-            reserved_bend_points.add(bend_key(bend))
-        placements.append({
-            "group": group,
-            "label": label,
-            "text_h": text_h,
-            "text_w": text_w,
-            "label_w": label_w,
-            "box": chosen_box,
-            "path": chosen_path,
-        })
+        for side in side_order:
+            if side == "top":
+                base_top = layout_y - outside_gap - label_h
+                max_rows = max(1, int((base_top - margin) // row_gap) + 1)
+                for lane in range(max_rows):
+                    top = base_top - lane * row_gap
+                    for slide in slide_offsets:
+                        left = x - w / 2 + slide
+                        box = (left, top, left + w, top + label_h)
+                        if box[0] < margin or box[1] < margin or box[2] > canvas_w - margin or box[3] > layout_y - 2:
+                            continue
+                        options.append((box, side))
 
-    for item in placements:
-        path = item["path"]
-        color = marker_color(item["label"])
+            elif side == "bottom":
+                base_top = layout_bottom + outside_gap
+                max_rows = max(1, int((canvas_h - margin - base_top - label_h) // row_gap) + 1)
+                for lane in range(max_rows):
+                    top = base_top + lane * row_gap
+                    for slide in slide_offsets:
+                        left = x - w / 2 + slide
+                        box = (left, top, left + w, top + label_h)
+                        if box[0] < margin or box[1] < layout_bottom + 2 or box[2] > canvas_w - margin or box[3] > canvas_h - margin:
+                            continue
+                        options.append((box, side))
 
-        draw.line(
-            [coord for point in path for coord in point],
-            fill=color,
-            width=max(3, int(round(callout_font_size / 16))),
-        )
-        draw_arrowhead(path, color)
+            elif side == "left":
+                base_left = layout_x - outside_gap - w
+                max_cols = max(1, int((base_left - margin) // col_gap) + 1)
+                vertical_offsets = [0, -label_h * 0.85, label_h * 0.85, -label_h * 1.65, label_h * 1.65, -label_h * 2.45, label_h * 2.45]
+                for lane in range(max_cols):
+                    left = base_left - lane * col_gap
+                    for voff in vertical_offsets:
+                        top = y - label_h / 2 + voff
+                        box = (left, top, left + w, top + label_h)
+                        if box[0] < margin or box[1] < margin or box[2] > layout_x - 2 or box[3] > canvas_h - margin:
+                            continue
+                        options.append((box, side))
 
-        group = item["group"]
-        dot_radius = 4
-        draw.ellipse(
-            [
-                group.get("draw_x", group["x"]) - dot_radius,
-                group.get("draw_y", group["y"]) - dot_radius,
-                group.get("draw_x", group["x"]) + dot_radius,
-                group.get("draw_y", group["y"]) + dot_radius,
-            ],
-            outline=color,
-            fill=white,
-            width=2,
-        )
+            else:  # right
+                base_left = layout_right + outside_gap
+                max_cols = max(1, int((canvas_w - margin - base_left - w) // col_gap) + 1)
+                vertical_offsets = [0, -label_h * 0.85, label_h * 0.85, -label_h * 1.65, label_h * 1.65, -label_h * 2.45, label_h * 2.45]
+                for lane in range(max_cols):
+                    left = base_left + lane * col_gap
+                    for voff in vertical_offsets:
+                        top = y - label_h / 2 + voff
+                        box = (left, top, left + w, top + label_h)
+                        if box[0] < layout_right + 2 or box[1] < margin or box[2] > canvas_w - margin or box[3] > canvas_h - margin:
+                            continue
+                        options.append((box, side))
 
-    for item in placements:
-        x1, y1, x2, y2 = item["box"]
-        label = item["label"]
-        text_h = item["text_h"]
+        # Final safeguard: keep only boxes fully outside the image rectangle.
+        outside_only = []
+        layout_rect = (layout_x, layout_y, layout_right, layout_bottom)
+        for box, side in options:
+            if not intersects(box, layout_rect, 0):
+                outside_only.append((box, side))
+        return outside_only, []
 
-        color = marker_color(label)
-        draw.rectangle(
-            [x1, y1, x2, y2],
-            outline=color,
-            fill=white,
-            width=max(4, int(round(callout_font_size / 12))),
-        )
-        text_x = x1 + max(0, (label_w - text_w) / 2)
-        text_y = y1 + max(6, (label_h - text_h) / 2 - 2)
+    def label_edge(box, side):
+        """Connect only to the exact midpoint of the box edge facing target.
 
-        draw.text(
-            (text_x, text_y),
-            label,
-            fill=color,
-            font=font,
-        )
+        Side refers to where the BOX is placed relative to the target.
+        """
+        x1, y1, x2, y2 = box
+        return {"top": ((x1+x2)/2, y2),      # bottom edge center
+                "bottom": ((x1+x2)/2, y1),   # top edge center
+                "left": (x2, (y1+y2)/2),     # right edge center
+                "right": (x1, (y1+y2)/2)}[side]  # left edge center
+
+    def outward_ok(anchor, next_point, side):
+        dx, dy = next_point[0]-anchor[0], next_point[1]-anchor[1]
+        return {"top": dy >= -0.01 and abs(dx) < 0.01,
+                "bottom": dy <= 0.01 and abs(dx) < 0.01,
+                "left": dx >= -0.01 and abs(dy) < 0.01,
+                "right": dx <= 0.01 and abs(dy) < 0.01}[side]
+
+    def route_candidates(anchor, target, side, blockers):
+        ax, ay = anchor
+        tx, ty = target
+        # A short perpendicular section connects to the EXACT edge midpoint.
+        # The remaining leader can be diagonal (as in the reference drawing).
+        direction = {"top": (0, 1), "bottom": (0, -1),
+                     "left": (1, 0), "right": (-1, 0)}[side]
+        stub_len = max(20, min(35, font_size * 0.55))
+        stub = (ax + direction[0] * stub_len,
+                ay + direction[1] * stub_len)
+        paths = [[anchor, stub, target]]
+        # Additional routes with a short section at either end of the diagonal.
+        for step in (24, 40, 65):
+            if side in ("top", "bottom"):
+                paths.append([anchor,stub,(tx,ty-step if ty>stub[1] else ty+step),target])
+            else:
+                paths.append([anchor,stub,(tx-step if tx>stub[0] else tx+step,ty),target])
+        # Orthogonal alternatives remain important in crowded spaces.
+        xs = [tx, ax, (ax+tx)/2]
+        ys = [ty, ay, (ay+ty)/2]
+        for rect in blockers:
+            xs.extend((rect[0]-route_clearance*2,rect[2]+route_clearance*2))
+            ys.extend((rect[1]-route_clearance*2,rect[3]+route_clearance*2))
+        for offset in (25,-25,55,-55,90,-90,140,-140):
+            xs.append(tx+offset)
+            ys.append(ty+offset)
+        for x in sorted(set(xs),key=lambda v:abs(v-tx))[:20]:
+            if 3<x<canvas_w-3:
+                paths.append([anchor,stub,(x,stub[1]),(x,ty),target])
+        for y in sorted(set(ys),key=lambda v:abs(v-ty))[:20]:
+            if 3<y<canvas_h-3:
+                paths.append([anchor,stub,(stub[0],y),(tx,y),target])
+        return (simplify(path) for path in paths)
+
+    def point_before_target(a, b, distance):
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        length = (dx*dx+dy*dy)**0.5
+        if length <= distance: return a
+        factor = (length-distance)/length
+        return (a[0]+dx*factor, a[1]+dy*factor)
+
+    def crossing_count(path, placed):
+        """Permit clean X crossings; prohibit collinear/shared-trunk overlap."""
+        count = 0
+        for record in placed:
+            old_path = record["path"]
+            for a, b in segments(path):
+                for c, d in segments(old_path):
+                    if not precise_segment_collision((a,b),(c,d),route_clearance):
+                        continue
+                    # Parallel or nearly parallel leaders that are too close
+                    # cannot be traced reliably and are still forbidden.
+                    ax, ay = b[0]-a[0], b[1]-a[1]
+                    bx, by = d[0]-c[0], d[1]-c[1]
+                    la = (ax*ax+ay*ay)**.5
+                    lb = (bx*bx+by*by)**.5
+                    if la < 1 or lb < 1:
+                        continue
+                    sinus = abs(ax*by-ay*bx)/(la*lb)
+                    if sinus < .24:
+                        return None
+                    if lines_intersect(a,b,c,d):
+                        count += 1
+                    else:
+                        # Near-miss is acceptable only with actual clearance.
+                        return None
+            if count > 2:
+                return None
+        return count
+
+    def valid(box, path, own_index, placed):
+        if any(intersects(box, r["box"], gap) for r in placed):
+            return None
+        if any(intersects(box, t, gap) for j,t in enumerate(targets) if j != own_index):
+            return None
+        if any(intersects(box, o, 2) for o in obstacles):
+            return None
+        if any(precise_path_hits_rectangle(path, r["box"]) for r in placed):
+            return None
+        if any(precise_path_hits_rectangle(path, t) for j,t in enumerate(targets) if j != own_index and (
+               abs(records[j]["target"][0]-records[own_index]["target"][0]) > marker_tolerance or
+               abs(records[j]["target"][1]-records[own_index]["target"][1]) > marker_tolerance)):
+            return None
+        for r in placed:
+            if precise_path_hits_rectangle(r["path"], box):
+                return None
+        return crossing_count(path, placed)
+
+    def search(index, placed, stage="outside", max_boxes=1500):
+        r = records[index]
+        best = None
+        best_score = float("inf")
+        blockers = [p["box"] for p in placed] + [t for j,t in enumerate(targets) if j != index]
+        outside, inside = candidate_boxes(r)
+        candidate_list = outside if stage == "outside" else inside
+        t_marker_search = time.perf_counter()
+        boxes_tried = 0
+        routes_tried = 0
+        collision_checks = 0
+        for box, side in candidate_list[:max_boxes]:
+            boxes_tried += 1
+            if any(intersects(box,p["box"],gap) for p in placed):
+                continue
+            if any(intersects(box,t,gap) for j,t in enumerate(targets) if j != index):
+                continue
+            if any(intersects(box,o,2) for o in obstacles):
+                continue
+            if content_integral is not None and rect_content_ratio(
+                    expanded(box,4),content_integral,canvas_w,canvas_h) > (0.06 if stage == "inside" else 0.10):
+                continue
+            anchor = label_edge(box,side)
+            for path in route_candidates(anchor,r["target"],side,blockers):
+                routes_tried += 1
+                if len(path) < 2 or not outward_ok(anchor,path[1],side):
+                    continue
+                if len(path)>1 and precise_path_hits_rectangle(path[1:],box,0):
+                    continue
+                collision_checks += 1
+                crossings = valid(box,path,index,placed)
+                if crossings is None:
+                    continue
+                length = sum(((a[0]-b[0])**2+(a[1]-b[1])**2)**.5 for a,b in segments(path))
+                direct = ((anchor[0]-r["target"][0])**2+(anchor[1]-r["target"][1])**2)**.5
+                score = length + 32*(len(path)-2) + 750*crossings + abs(direct-preferred_leader)*.12
+                if score < best_score:
+                    best_score = score
+                    best = {**r,"box":box,"side":side,"path":path,"crossings":crossings}
+        timing_log("marker_search", label=r["label"].replace(" ", ""), stage=stage,
+                   placed=len(placed), boxes=boxes_tried, routes=routes_tried,
+                   collisions=collision_checks, found=int(best is not None),
+                   seconds=f"{time.perf_counter()-t_marker_search:.3f}")
+        return best
+
+    # Resolve dense/long labels first, then allow a fresh ordering if blocked.
+    # Never accept a collided shortest-path fallback.
+    orders = [list(range(len(records))),
+              sorted(range(len(records)),key=lambda i:-records[i]["width"]),
+              sorted(range(len(records)),key=lambda i:records[i]["target"]),
+              list(reversed(range(len(records))))]
+    best_layout = []
+    best_cost = float("inf")
+    for order_index, order in enumerate(orders, 1):
+        t_order = time.perf_counter()
+        timing_log("order_start", order=order_index, groups=len(order))
+        placed = []
+        # Outside-only: never place text on top of the original drawing.
+        for idx in order:
+            result = search(idx, placed, "outside")
+            if result is not None:
+                placed.append(result)
+        timing_log("order_end", order=order_index, placed=len(placed),
+                   total=len(records), seconds=f"{time.perf_counter()-t_order:.3f}")
+        cost = sum(p.get("crossings",0) for p in placed)
+        if len(placed) > len(best_layout) or (len(placed)==len(best_layout) and cost < best_cost):
+            best_layout, best_cost = placed, cost
+        if len(best_layout)==len(records) and best_cost==0:
+            break
+
+    timing_log("placement_end", placed=len(best_layout), total=len(records),
+               seconds=f"{time.perf_counter()-t_callout:.3f}")
+    if len(best_layout) != len(records):
+        missing = sorted(set(range(len(records))) -
+                         {next(i for i,r in enumerate(records) if r is p or
+                               (r["target"]==p["target"] and r["label"]==p["label"])) for p in best_layout})
+        print("WARNING: no collision-free label route found for: " +
+              ", ".join(records[i]["label"] for i in missing),file=sys.stderr,flush=True)
+        # Do not silently publish an incomplete Appendix 4 page.
+        raise RuntimeError("Cannot route all marker labels without overlap: " +
+                           ", ".join(records[i]["label"] for i in missing))
+
+    def arrowhead(path,color):
+        tip,prev = path[-1],path[-2]
+        dx,dy = tip[0]-prev[0],tip[1]-prev[1]
+        size = 8
+        if abs(dx)>abs(dy):
+            sign=1 if dx>0 else -1
+            tri=[tip,(tip[0]-sign*size,tip[1]-5),(tip[0]-sign*size,tip[1]+5)]
+        else:
+            sign=1 if dy>0 else -1
+            tri=[tip,(tip[0]-5,tip[1]-sign*size),(tip[0]+5,tip[1]-sign*size)]
+        draw.polygon(tri,fill=color)
+
+    for r in best_layout:
+        color=color_for(r["label"])
+        path=r["path"]
+        draw.line([c for p in path for c in p],fill=color,width=max(3,int(font_size/16)))
+        arrowhead(path,color)
+        x,y=r["target"]
+        draw.ellipse((x-4,y-4,x+4,y+4),outline=color,fill=white,width=2)
+    for r in best_layout:
+        x1,y1,x2,y2=r["box"]
+        color=color_for(r["label"])
+        draw.rectangle((x1,y1,x2,y2),outline=color,fill=white,width=max(2,int(font_size/22)))
+        draw.text((x1+(r["width"]-r["text_w"])/2,
+                   y1+max(6,(label_h-r["text_h"])/2-2)),
+                  r["label"],fill=color,font=font)
+
+
 def percent_to_unit(value):
     try:
         number = float(value or 0)
@@ -854,6 +757,50 @@ def marker_points_for_image(markers, image_width, image_height, outer_pad, y_off
     return points
 
 
+def render_with_dynamic_margins(base_image, marker_data, base_padding=180,
+                                max_padding=2400, padding_step=160):
+    """Render all callouts in outer white gutters, retrying with bigger gutters.
+
+    Coordinates are always recalculated relative to the original image. A failed
+    attempt never modifies the original image or publishes a partial result.
+    """
+    width, height = base_image.size
+    last_error = None
+    t_render = time.perf_counter()
+    for attempt, pad in enumerate(range(base_padding, max_padding + 1, padding_step), 1):
+        t_attempt = time.perf_counter()
+        timing_log("padding_start", attempt=attempt, padding=pad, markers=len(marker_data))
+        canvas = Image.new("RGB", (width + 2 * pad, height + 2 * pad), "white")
+        canvas.paste(base_image, (pad, pad))
+        points = marker_points_for_image(marker_data, width, height, pad)
+        try:
+            draw_callout_markers(
+                ImageDraw.Draw(canvas), points,
+                layout_box=(pad, pad, width, height),
+                canvas_size=canvas.size,
+                obstacle_rects=detect_compartment_rects(base_image, pad),
+                content_integral=build_content_integral(canvas),
+                labels_outside=True,
+            )
+            timing_log("padding_success", attempt=attempt, padding=pad,
+                       seconds=f"{time.perf_counter()-t_attempt:.3f}",
+                       total_seconds=f"{time.perf_counter()-t_render:.3f}")
+            if pad > base_padding:
+                print(f"APPENDIX4: outer margin expanded to {pad}px", file=sys.stderr, flush=True)
+            return canvas
+        except RuntimeError as exc:
+            if "Cannot route all marker labels" not in str(exc):
+                raise
+            last_error = exc
+            timing_log("padding_retry", attempt=attempt, padding=pad,
+                       seconds=f"{time.perf_counter()-t_attempt:.3f}",
+                       reason=str(exc).replace(" ", "_")[:250])
+    timing_log("padding_failed", total_seconds=f"{time.perf_counter()-t_render:.3f}")
+    raise RuntimeError(
+        f"Outside-only label placement failed up to {max_padding}px margin: {last_error}"
+    )
+
+
 def save_marked_layout(source_path, markers, output_path, outer_pad=120):
     base_image = Image.open(source_path).convert("RGB")
     image_width, image_height = base_image.size
@@ -872,31 +819,7 @@ def save_marked_layout(source_path, markers, output_path, outer_pad=120):
         image_height = int(image_height * scale)
         base_image = base_image.resize((image_width, image_height), Image.Resampling.LANCZOS)
 
-    marked_image = Image.new(
-        "RGB",
-        (image_width + outer_pad * 2, image_height + outer_pad * 2),
-        (255, 255, 255)
-    )
-    marked_image.paste(base_image, (outer_pad, outer_pad))
-
-    draw = ImageDraw.Draw(marked_image)
-    marker_points = marker_points_for_image(
-        markers,
-        image_width,
-        image_height,
-        outer_pad
-    )
-    obstacle_rects = detect_compartment_rects(base_image, outer_pad)
-    draw_callout_markers(
-        draw,
-        marker_points,
-        layout_box=(outer_pad, outer_pad, image_width, image_height),
-        canvas_size=marked_image.size,
-        obstacle_rects=obstacle_rects,
-        content_integral=build_content_integral(marked_image),
-        # Appendix 4 labels must stay in the outer white margin.
-        labels_outside=True
-    )
+    marked_image = render_with_dynamic_margins(base_image, markers, base_padding=outer_pad)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     marked_image.save(output_path, dpi=(300, 300), quality=95)
@@ -911,6 +834,7 @@ def main():
     output_image = Path(sys.argv[2])
     placement_json = Path(sys.argv[3])
 
+    t_main = time.perf_counter()
     data = json.loads(input_json.read_text(encoding="utf-8"))
     print("APPENDIX4: input loaded", file=sys.stderr, flush=True)
 
@@ -1138,20 +1062,14 @@ def main():
         })
 
 
-    draw_callout_markers(
-        draw,
-        common_marker_points,
-        layout_box=(outer_pad, outer_pad, ga_w, ga_h),
-        canvas_size=ga_img.size,
-        obstacle_rects=common_obstacle_rects,
-        content_integral=build_content_integral(ga_img),
-        # Keep generated callouts outside the GA drawing, matching hazardous output.
-        labels_outside=True
-    )
+    # Redraw the main page with a margin that grows until outside-only labels fit.
+    # Earlier area-placement percentages are independent of this final padding.
+    ga_img = render_with_dynamic_margins(base_img, common_markers, base_padding=outer_pad)
 
     output_image.parent.mkdir(parents=True, exist_ok=True)
     ga_img.save(output_image, dpi=(300, 300), quality=95)
     print(f"APPENDIX4: GA image saved path={output_image}", file=sys.stderr, flush=True)
+    timing_log("main_ga_image_saved", seconds=f"{time.perf_counter()-t_main:.3f}")
 
     manifest_path = output_image.parent / "appendix4-layout-pages.json"
     manifest_path.write_text(
@@ -1159,6 +1077,7 @@ def main():
         encoding="utf-8"
     )
 
+    timing_log("main_total", seconds=f"{time.perf_counter()-t_main:.3f}")
     placement_json.write_text(
         json.dumps(output_placements, indent=2),
         encoding="utf-8"
