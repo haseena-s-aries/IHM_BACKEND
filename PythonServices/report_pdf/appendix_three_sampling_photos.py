@@ -58,9 +58,15 @@ def _result_label(checkpoint):
 def _result_value(checkpoint):
     check_result = txt(checkpoint.get("checkResult"))
     hazardous_material = txt(checkpoint.get("hazardousMaterial"))
+    site_remark = txt(
+        checkpoint.get("locationRemarks")
+        or checkpoint.get("LocationRemarks")
+        or checkpoint.get("siteRemark")
+        or checkpoint.get("SiteRemark")
+    )
 
     if check_result.lower() == "no":
-        return "Not detected"
+        return site_remark if site_remark and site_remark != "-" else "Not detected"
 
     if check_result.lower() == "yes":
         return f"Containing {hazardous_material}" if hazardous_material else "Containing"

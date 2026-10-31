@@ -171,6 +171,7 @@ namespace Survey_Certification_App.Controllers
             checkpoint.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
+            await RefreshCheckpointSampleNumbersAsync(checkpoint.SurveyJobId);
 
             return Ok(ToCheckpointDto(checkpoint));
         }
@@ -837,9 +838,6 @@ namespace Survey_Certification_App.Controllers
                     .ToDictionary(x => x.Key, x => x.First());
 
                 var importedKeys = new HashSet<string>();
-                var samplingNumber = 0;
-                var visualNumber = 0;
-
                 foreach (var areaDto in parsed.Areas)
                 {
                     var area = areasByName[NormalizeExcelKey(areaDto.AreaName)];
@@ -868,14 +866,12 @@ namespace Survey_Certification_App.Controllers
                         }
 
                         checkpoint.IhmAreaId = area.Id;
-                        // The Excel row order controls numbering. A row is Visual only
-                        // when the Visual Check column contains V/Visual; otherwise it
-                        // belongs to the Sampling sequence. Do not use Sample No here.
                         var visualCheck = NormalizeExcelKey(checkpointDto.VisualCheck);
                         var isVisual = visualCheck == "V" || visualCheck.StartsWith("VISUAL");
-                        checkpoint.Sample_No = isVisual
-                            ? $"V{++visualNumber:00}"
-                            : $"S{++samplingNumber:00}";
+                        // Do not assign sequence numbers during import. Until all
+                        // checkpoint cards are Done, cards and markers show only
+                        // the procedure prefix.
+                        checkpoint.Sample_No = isVisual ? "V" : "S";
                         AssignIfProvided(checkpointDto.Description, value => checkpoint.Description = value ?? string.Empty);
                         AssignIfProvided(checkpointDto.TableType, value => checkpoint.TableType = value);
                         AssignIfProvided(checkpointDto.EquipmentName, value => checkpoint.EquipmentName = value);
@@ -925,6 +921,7 @@ namespace Survey_Certification_App.Controllers
                 }
 
                 await _db.SaveChangesAsync();
+                await RefreshCheckpointSampleNumbersAsync(jobId);
 
                 var reportInfo = await _db.IhmReportInfos
                     .FirstOrDefaultAsync(x => x.SurveyJobId == jobId);
@@ -1040,6 +1037,7 @@ namespace Survey_Certification_App.Controllers
             checkpoint.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
+            await RefreshCheckpointSampleNumbersAsync(checkpoint.SurveyJobId);
 
             return Ok(ToCheckpointDto(checkpoint));
         }
@@ -1374,6 +1372,7 @@ namespace Survey_Certification_App.Controllers
             checkpoint.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
+            await RefreshCheckpointSampleNumbersAsync(checkpoint.SurveyJobId);
 
             return Ok(ToCheckpointDto(checkpoint));
         }
@@ -3523,6 +3522,63 @@ namespace Survey_Certification_App.Controllers
             checkpoint.LocationRemarks = request.LocationRemarks;
             checkpoint.UpdatedByUserId = request.UpdatedByUserId;
             checkpoint.UpdatedAt = DateTime.UtcNow;
+        }
+
+        private async Task RefreshCheckpointSampleNumbersAsync(int jobId)
+        {
+            var checkpoints = await _db.IhmCheckpoints
+                .Where(x => x.SurveyJobId == jobId)
+                .OrderBy(x => x.SourceRowNumber ?? int.MaxValue)
+                .ThenBy(x => x.Id)
+                .ToListAsync();
+
+            if (checkpoints.Count == 0)
+                return;
+
+            var samplingNumber = 0;
+            var visualNumber = 0;
+
+            foreach (var checkpoint in checkpoints)
+            {
+                var visual = (checkpoint.VisualCheck ?? string.Empty)
+                    .Trim()
+                    .ToUpperInvariant()
+                    .Replace(" ", string.Empty);
+                var isVisual = visual == "V" || visual.StartsWith("VISUAL");
+                // Reserve the sequence slot according to the original Excel
+                // order, even when an earlier card is still pending. This
+                // prevents later cards from being renumbered when that card
+                // is completed later at site.
+                var reservedLabel = isVisual
+                    ? $"V{++visualNumber:00}"
+                    : $"S{++samplingNumber:00}";
+
+                var nextLabel = checkpoint.AuditStatus == IhmCheckpointAuditStatus.Done
+                    ? reservedLabel
+                    : (isVisual ? "V" : "S");
+
+                checkpoint.Sample_No = nextLabel;
+            }
+
+            var checkpointIds = checkpoints.Select(x => x.Id).ToList();
+            var markers = await _db.IhmImageMarkers
+                .Where(x => x.SurveyJobId == jobId &&
+                            x.IhmCheckpointId.HasValue &&
+                            checkpointIds.Contains(x.IhmCheckpointId.Value))
+                .ToListAsync();
+
+            var labelsById = checkpoints.ToDictionary(x => x.Id, x => x.Sample_No);
+            foreach (var marker in markers)
+            {
+                if (marker.IhmCheckpointId.HasValue &&
+                    labelsById.TryGetValue(marker.IhmCheckpointId.Value, out var label))
+                {
+                    marker.MarkerLabel = label;
+                }
+            }
+
+            await _db.SaveChangesAsync();
+            QueueMarkedImages(jobId, force: true);
         }
 
         private async Task<bool> CanAccessIhmJobAsync(int jobId)
