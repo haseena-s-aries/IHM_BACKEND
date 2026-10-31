@@ -50,7 +50,8 @@ def _method_of_inspection(checkpoint):
 
 def _result_label(checkpoint):
     if txt(checkpoint.get("samplingCheck")).upper() == "S":
-        return "LAB TEST RESULT"
+        # Keep the complete label visible in the narrow left column.
+        return "LAB TEST\nRESULT"
 
     return "RESULT"
 

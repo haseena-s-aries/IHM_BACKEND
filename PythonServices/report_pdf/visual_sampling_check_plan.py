@@ -316,9 +316,10 @@ def checkpoint_remarks(row):
         "LocationRemarks",
         "Location_Remark",
     )
-    if excel_remark and site_remark:
-        return f"{excel_remark} ({site_remark})"
-    return excel_remark or site_remark or "-"
+    # A survey/site remark is the latest field-entered value and should replace
+    # the imported Excel remark when present. Fall back to Excel only when no
+    # site remark was entered.
+    return site_remark or excel_remark or "-"
 
 
 def checkpoint_row_values(row):
