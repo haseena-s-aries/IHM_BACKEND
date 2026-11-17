@@ -81,6 +81,99 @@ namespace Survey_Certification_App.Controllers
             return new JwtSecurityTokenHandler().WriteToken(token);
         }
 
+        public class RefreshTokenRequestDto
+        {
+            public string? Token { get; set; }
+        }
+
+        // Mobile clients keep the user signed in across app restarts and offline
+        // periods, but access tokens expire after 1 hour. This endpoint exchanges a
+        // correctly signed token (even if expired, up to the grace window below)
+        // for a fresh one, after re-checking that the user is still allowed in.
+        private static readonly TimeSpan RefreshGraceWindow = TimeSpan.FromDays(30);
+
+        [AllowAnonymous]
+        [HttpPost("refresh-token")]
+        public async Task<IActionResult> RefreshToken([FromBody] RefreshTokenRequestDto? dto)
+        {
+            var rawToken = dto?.Token?.Trim();
+            if (string.IsNullOrWhiteSpace(rawToken))
+            {
+                var header = Request.Headers.Authorization.ToString();
+                if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                    rawToken = header.Substring("Bearer ".Length).Trim();
+            }
+
+            if (string.IsNullOrWhiteSpace(rawToken))
+                return Unauthorized(new { message = "Token is required." });
+
+            var key = _config["Jwt:Key"] ?? "THIS_SHOULD_BE_A_LONG_RANDOM_SECRET_KEY";
+            var issuer = _config["Jwt:Issuer"] ?? "https://auth.mycompany.com";
+            var audience = _config["Jwt:Audience"] ?? "my-apps";
+
+            ClaimsPrincipal principal;
+            SecurityToken validatedToken;
+            try
+            {
+                principal = new JwtSecurityTokenHandler().ValidateToken(
+                    rawToken,
+                    new TokenValidationParameters
+                    {
+                        ValidateIssuer = true,
+                        ValidateAudience = true,
+                        ValidateLifetime = false,
+                        ValidateIssuerSigningKey = true,
+                        ValidIssuer = issuer,
+                        ValidAudience = audience,
+                        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key))
+                    },
+                    out validatedToken);
+            }
+            catch
+            {
+                return Unauthorized(new { message = "Session is invalid. Please login again." });
+            }
+
+            if (validatedToken.ValidTo != DateTime.MinValue &&
+                validatedToken.ValidTo.Add(RefreshGraceWindow) < DateTime.UtcNow)
+            {
+                return Unauthorized(new { message = "Session expired. Please login again." });
+            }
+
+            var userIdText = principal.FindFirst("userId")?.Value
+                ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+
+            if (!int.TryParse(userIdText, out var userId) || userId <= 0)
+                return Unauthorized(new { message = "Session is invalid. Please login again." });
+
+            var user = await _db.users.FirstOrDefaultAsync(u => u.Id == userId);
+            if (user == null || user.IsRejected || !user.IsApproved)
+                return Unauthorized(new { message = "Your account is no longer active. Please login again." });
+
+            var token = GenerateJwtToken(user);
+            var effectiveRole = !string.IsNullOrWhiteSpace(user.RoleName)
+                ? user.RoleName.Trim()
+                : user.Role?.Trim() ?? "";
+
+            return Ok(new
+            {
+                message = "Token refreshed",
+                token,
+                user = new
+                {
+                    id = user.Id,
+                    userId = user.Id,
+                    fullName = user.FullName,
+                    email = user.Email,
+                    role = effectiveRole,
+                    projectId = user.ProjectId,
+                    projectName = user.ProjectName,
+                    roleName = effectiveRole
+                }
+            });
+        }
+
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginUserDto dto)
         {
