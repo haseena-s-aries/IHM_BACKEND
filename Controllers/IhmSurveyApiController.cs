@@ -1054,6 +1054,24 @@ namespace Survey_Certification_App.Controllers
             return Ok(photos);
         }
 
+        // Bulk variant used by mobile offline sync: every checkpoint photo of a
+        // job in one request instead of one request per checkpoint.
+        [HttpGet("jobs/{jobId:int}/checkpoint-photos")]
+        public async Task<IActionResult> GetJobCheckpointPhotos(int jobId)
+        {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return Forbid();
+
+            var photos = await _db.IhmSamplingPhotos
+                .AsNoTracking()
+                .Where(x => x.SurveyJobId == jobId && x.IhmCheckpointId != null)
+                .OrderByDescending(x => x.UploadedAt)
+                .Select(x => ToSamplingPhotoDto(x))
+                .ToListAsync();
+
+            return Ok(photos);
+        }
+
         [HttpPost("jobs/{jobId:int}/checkpoints/{checkpointId:int}/photos")]
         public async Task<IActionResult> UploadCheckpointPhoto(
             int jobId,
@@ -1659,6 +1677,97 @@ namespace Survey_Certification_App.Controllers
                 .FirstOrDefaultAsync();
 
             return Ok(commonLayout == null ? Array.Empty<object>() : new object[] { commonLayout });
+        }
+
+        // Bulk variant of GetApplicableLayouts for mobile offline sync: resolves
+        // the applicable layout for every area of the job in one request, using
+        // the same priority (machinery assignment > area layout > GA layout).
+        [HttpGet("jobs/{jobId:int}/area-layouts")]
+        public async Task<IActionResult> GetApplicableLayoutsForAllAreas(int jobId)
+        {
+            if (!await CanAccessIhmJobAsync(jobId))
+                return Forbid();
+
+            var areaIds = await _db.IhmAreas
+                .AsNoTracking()
+                .Where(x => x.SurveyJobId == jobId)
+                .Select(x => x.Id)
+                .ToListAsync();
+
+            var layoutPhotos = await _db.IhmSamplingPhotos
+                .AsNoTracking()
+                .Where(x => x.SurveyJobId == jobId && x.IhmCheckpointId == null)
+                .OrderByDescending(x => x.UploadedAt)
+                .ToListAsync();
+
+            var machineryLayouts = layoutPhotos
+                .Where(x => x.IhmAreaId == null && x.Caption == "Machinery layout")
+                .ToList();
+            var commonLayout = layoutPhotos
+                .FirstOrDefault(x => x.IhmAreaId == null && x.Caption == "Full GA layout");
+
+            static bool IsAssigned(IhmSamplingPhoto layout, int areaId) =>
+                (layout.AssignedAreaIds ?? string.Empty)
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Any(id => int.TryParse(id, out var assignedAreaId) && assignedAreaId == areaId);
+
+            var result = areaIds.Select(areaId =>
+            {
+                var machinery = machineryLayouts.FirstOrDefault(x => IsAssigned(x, areaId));
+                var areaLayout = layoutPhotos.FirstOrDefault(x => x.IhmAreaId == areaId);
+
+                object[] layouts;
+                if (machinery != null)
+                {
+                    layouts = new object[]
+                    {
+                        new
+                        {
+                            machinery.Id,
+                            machinery.IhmAreaId,
+                            machinery.FilePath,
+                            machinery.OriginalFileName,
+                            IsCommon = false
+                        }
+                    };
+                }
+                else if (areaLayout != null)
+                {
+                    layouts = new object[]
+                    {
+                        new
+                        {
+                            areaLayout.Id,
+                            areaLayout.IhmAreaId,
+                            areaLayout.FilePath,
+                            areaLayout.OriginalFileName,
+                            IsCommon = false
+                        }
+                    };
+                }
+                else if (commonLayout != null)
+                {
+                    layouts = new object[]
+                    {
+                        new
+                        {
+                            commonLayout.Id,
+                            commonLayout.IhmAreaId,
+                            commonLayout.FilePath,
+                            commonLayout.OriginalFileName,
+                            IsCommon = true
+                        }
+                    };
+                }
+                else
+                {
+                    layouts = Array.Empty<object>();
+                }
+
+                return new { AreaId = areaId, Layouts = layouts };
+            });
+
+            return Ok(result);
         }
 
         [HttpGet("jobs/{jobId:int}/layout-attachments")]
