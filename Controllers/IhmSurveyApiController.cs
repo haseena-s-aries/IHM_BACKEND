@@ -171,7 +171,7 @@ namespace Survey_Certification_App.Controllers
             checkpoint.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
-            await RefreshCheckpointSampleNumbersAsync(checkpoint.SurveyJobId);
+            await SyncCheckpointLabelsAsync(checkpoint.SurveyJobId);
 
             return Ok(ToCheckpointDto(checkpoint));
         }
@@ -868,10 +868,11 @@ namespace Survey_Certification_App.Controllers
                         checkpoint.IhmAreaId = area.Id;
                         var visualCheck = NormalizeExcelKey(checkpointDto.VisualCheck);
                         var isVisual = visualCheck == "V" || visualCheck.StartsWith("VISUAL");
-                        // Do not assign sequence numbers during import. Until all
-                        // checkpoint cards are Done, cards and markers show only
-                        // the procedure prefix.
-                        checkpoint.Sample_No = isVisual ? "V" : "S";
+                        // Numbers are entered manually by the surveyor. New
+                        // checkpoints start with just the prefix (S or V). On
+                        // re-import, keep a number already entered, switching
+                        // only its letter if the procedure changed.
+                        checkpoint.Sample_No = SwitchProcedurePrefix(checkpoint.Sample_No, isVisual);
                         AssignIfProvided(checkpointDto.Description, value => checkpoint.Description = value ?? string.Empty);
                         AssignIfProvided(checkpointDto.TableType, value => checkpoint.TableType = value);
                         AssignIfProvided(checkpointDto.EquipmentName, value => checkpoint.EquipmentName = value);
@@ -921,7 +922,7 @@ namespace Survey_Certification_App.Controllers
                 }
 
                 await _db.SaveChangesAsync();
-                await RefreshCheckpointSampleNumbersAsync(jobId);
+                await SyncCheckpointLabelsAsync(jobId);
 
                 var reportInfo = await _db.IhmReportInfos
                     .FirstOrDefaultAsync(x => x.SurveyJobId == jobId);
@@ -1022,11 +1023,13 @@ namespace Survey_Certification_App.Controllers
             {
                 checkpoint.VisualCheck = "V";
                 checkpoint.SamplingCheck = "-";
+                checkpoint.Sample_No = SwitchProcedurePrefix(checkpoint.Sample_No, toVisual: true);
             }
             else if (type == "sample")
             {
                 checkpoint.SamplingCheck = "S";
                 checkpoint.VisualCheck = "-";
+                checkpoint.Sample_No = SwitchProcedurePrefix(checkpoint.Sample_No, toVisual: false);
             }
             else
             {
@@ -1037,7 +1040,7 @@ namespace Survey_Certification_App.Controllers
             checkpoint.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
-            await RefreshCheckpointSampleNumbersAsync(checkpoint.SurveyJobId);
+            await SyncCheckpointLabelsAsync(checkpoint.SurveyJobId);
 
             return Ok(ToCheckpointDto(checkpoint));
         }
@@ -1390,7 +1393,7 @@ namespace Survey_Certification_App.Controllers
             checkpoint.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
-            await RefreshCheckpointSampleNumbersAsync(checkpoint.SurveyJobId);
+            await SyncCheckpointLabelsAsync(checkpoint.SurveyJobId);
 
             return Ok(ToCheckpointDto(checkpoint));
         }
@@ -3633,7 +3636,11 @@ namespace Survey_Certification_App.Controllers
             checkpoint.UpdatedAt = DateTime.UtcNow;
         }
 
-        private async Task RefreshCheckpointSampleNumbersAsync(int jobId)
+        // Sample / visual numbers (S01, V01, ...) are entered manually by the
+        // surveyor and are never renumbered here. This only gives a checkpoint
+        // with no label its procedure prefix (S or V) and keeps the layout
+        // marker labels in sync with the checkpoint numbers.
+        private async Task SyncCheckpointLabelsAsync(int jobId)
         {
             var checkpoints = await _db.IhmCheckpoints
                 .Where(x => x.SurveyJobId == jobId)
@@ -3644,29 +3651,12 @@ namespace Survey_Certification_App.Controllers
             if (checkpoints.Count == 0)
                 return;
 
-            var samplingNumber = 0;
-            var visualNumber = 0;
-
             foreach (var checkpoint in checkpoints)
             {
-                var visual = (checkpoint.VisualCheck ?? string.Empty)
-                    .Trim()
-                    .ToUpperInvariant()
-                    .Replace(" ", string.Empty);
-                var isVisual = visual == "V" || visual.StartsWith("VISUAL");
-                // Reserve the sequence slot according to the original Excel
-                // order, even when an earlier card is still pending. This
-                // prevents later cards from being renumbered when that card
-                // is completed later at site.
-                var reservedLabel = isVisual
-                    ? $"V{++visualNumber:00}"
-                    : $"S{++samplingNumber:00}";
+                if (!string.IsNullOrWhiteSpace(checkpoint.Sample_No))
+                    continue;
 
-                var nextLabel = checkpoint.AuditStatus == IhmCheckpointAuditStatus.Done
-                    ? reservedLabel
-                    : (isVisual ? "V" : "S");
-
-                checkpoint.Sample_No = nextLabel;
+                checkpoint.Sample_No = IsVisualCheckpoint(checkpoint.VisualCheck) ? "V" : "S";
             }
 
             var checkpointIds = checkpoints.Select(x => x.Id).ToList();
@@ -3688,6 +3678,31 @@ namespace Survey_Certification_App.Controllers
 
             await _db.SaveChangesAsync();
             QueueMarkedImages(jobId, force: true);
+        }
+
+        private static bool IsVisualCheckpoint(string? visualCheck)
+        {
+            var visual = (visualCheck ?? string.Empty)
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", string.Empty);
+            return visual == "V" || visual.StartsWith("VISUAL");
+        }
+
+        // When a checkpoint changes between Sample and Visual, switch only the
+        // letter and keep the number the surveyor entered (S05 -> V05).
+        private static string SwitchProcedurePrefix(string? sampleNo, bool toVisual)
+        {
+            var prefix = toVisual ? "V" : "S";
+            var value = (sampleNo ?? string.Empty).Trim();
+            if (value.Length == 0 ||
+                value.Equals("S", StringComparison.OrdinalIgnoreCase) ||
+                value.Equals("V", StringComparison.OrdinalIgnoreCase))
+                return prefix;
+
+            var match = System.Text.RegularExpressions.Regex.Match(
+                value, "^[SsVv](\\d+)$");
+            return match.Success ? prefix + match.Groups[1].Value : value;
         }
 
         private async Task<bool> CanAccessIhmJobAsync(int jobId)
