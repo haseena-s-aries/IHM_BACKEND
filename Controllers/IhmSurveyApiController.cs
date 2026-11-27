@@ -868,11 +868,19 @@ namespace Survey_Certification_App.Controllers
                         checkpoint.IhmAreaId = area.Id;
                         var visualCheck = NormalizeExcelKey(checkpointDto.VisualCheck);
                         var isVisual = visualCheck == "V" || visualCheck.StartsWith("VISUAL");
+                        var isSampleRow = !isVisual && IsSampleCheckpoint(checkpointDto.SamplingCheck);
+                        var rowDecided = isVisual || isSampleRow;
                         // Numbers are entered manually by the surveyor. New
-                        // checkpoints start with just the prefix (S or V). On
-                        // re-import, keep a number already entered, switching
-                        // only its letter if the procedure changed.
-                        checkpoint.Sample_No = SwitchProcedurePrefix(checkpoint.Sample_No, isVisual);
+                        // checkpoints start with just the prefix (S or V), or
+                        // empty when the Excel leaves S/V blank ("Not decided";
+                        // the surveyor chooses later). On re-import, keep a number
+                        // already entered, switching only its letter if the
+                        // procedure changed. A blank row never overrides the
+                        // surveyor's choice.
+                        if (rowDecided)
+                            checkpoint.Sample_No = SwitchProcedurePrefix(checkpoint.Sample_No, isVisual);
+                        else if (isNewCheckpoint)
+                            checkpoint.Sample_No = string.Empty;
                         AssignIfProvided(checkpointDto.Description, value => checkpoint.Description = value ?? string.Empty);
                         AssignIfProvided(checkpointDto.TableType, value => checkpoint.TableType = value);
                         AssignIfProvided(checkpointDto.EquipmentName, value => checkpoint.EquipmentName = value);
@@ -884,8 +892,11 @@ namespace Survey_Certification_App.Controllers
                         AssignIfProvided(checkpointDto.QuantityTotalKg, value => checkpoint.QuantityTotalKg = value);
                         AssignIfProvided(checkpointDto.ManufacturerBrandName, value => checkpoint.ManufacturerBrandName = value);
                         AssignIfProvided(checkpointDto.DocumentAnalysisResult, value => checkpoint.DocumentAnalysisResult = value);
-                        AssignIfProvided(checkpointDto.SamplingCheck, value => checkpoint.SamplingCheck = value);
-                        AssignIfProvided(checkpointDto.VisualCheck, value => checkpoint.VisualCheck = value);
+                        if (rowDecided || isNewCheckpoint)
+                        {
+                            AssignIfProvided(checkpointDto.SamplingCheck, value => checkpoint.SamplingCheck = value);
+                            AssignIfProvided(checkpointDto.VisualCheck, value => checkpoint.VisualCheck = value);
+                        }
                         AssignIfProvided(checkpointDto.CheckResult, value => checkpoint.CheckResult = value);
                         AssignIfProvided(checkpointDto.Remarks, value => checkpoint.Remarks = value);
                         AssignIfProvided(checkpointDto.LocationRemarks, value => checkpoint.LocationRemarks = value);
@@ -1030,8 +1041,7 @@ namespace Survey_Certification_App.Controllers
                 return BadRequest(new { message = "Enter S or V followed by a number, e.g. S01 or V01." });
 
             var isVisual = IsVisualCheckpoint(checkpoint.VisualCheck);
-            var isSample = !isVisual &&
-                string.Equals((checkpoint.SamplingCheck ?? string.Empty).Trim(), "S", StringComparison.OrdinalIgnoreCase);
+            var isSample = !isVisual && IsSampleCheckpoint(checkpoint.SamplingCheck);
             if (isVisual && !value.StartsWith("V"))
                 return BadRequest(new { message = "This is a Visual checkpoint, so the number must start with V. Use \"Change to S\" first to make it Sample." });
             if (isSample && !value.StartsWith("S"))
@@ -1048,6 +1058,14 @@ namespace Survey_Certification_App.Controllers
                     .FirstOrDefaultAsync();
                 if (usedBy > 0)
                     return Conflict(new { message = $"{value} is already used by another checkpoint in this job.", duplicate = true });
+            }
+
+            // "Not decided" checkpoint: the letter typed decides the procedure.
+            if (!isVisual && !isSample)
+            {
+                var toVisual = value.StartsWith("V");
+                checkpoint.VisualCheck = toVisual ? "V" : "-";
+                checkpoint.SamplingCheck = toVisual ? "-" : "S";
             }
 
             checkpoint.Sample_No = value;
@@ -1444,6 +1462,12 @@ namespace Survey_Certification_App.Controllers
             checkpoint.LocationRemarks = request.LocationRemarks;
             checkpoint.UpdatedByUserId = request.UpdatedByUserId ?? GetCurrentUserId();
             checkpoint.UpdatedAt = DateTime.UtcNow;
+
+            if (checkpoint.AuditStatus == IhmCheckpointAuditStatus.Done &&
+                IsProcedureUndecided(checkpoint))
+            {
+                return BadRequest(new { message = "Choose Sample or Visual first." });
+            }
 
             await _db.SaveChangesAsync();
             await SyncCheckpointLabelsAsync(checkpoint.SurveyJobId);
@@ -3706,10 +3730,24 @@ namespace Survey_Certification_App.Controllers
 
             foreach (var checkpoint in checkpoints)
             {
+                // Older imports gave blank-S/V rows a bare "S". While the
+                // procedure is still undecided, show no number instead.
+                if (IsProcedureUndecided(checkpoint) &&
+                    (checkpoint.Sample_No ?? string.Empty).Trim().ToUpperInvariant() is "S" or "V")
+                {
+                    checkpoint.Sample_No = string.Empty;
+                    continue;
+                }
+
                 if (!string.IsNullOrWhiteSpace(checkpoint.Sample_No))
                     continue;
 
-                checkpoint.Sample_No = IsVisualCheckpoint(checkpoint.VisualCheck) ? "V" : "S";
+                // "Not decided" checkpoints (S/V blank in the Excel) keep an
+                // empty number until the surveyor chooses Sample or Visual.
+                if (IsVisualCheckpoint(checkpoint.VisualCheck))
+                    checkpoint.Sample_No = "V";
+                else if (IsSampleCheckpoint(checkpoint.SamplingCheck))
+                    checkpoint.Sample_No = "S";
             }
 
             var checkpointIds = checkpoints.Select(x => x.Id).ToList();
@@ -3742,6 +3780,20 @@ namespace Survey_Certification_App.Controllers
             return visual == "V" || visual.StartsWith("VISUAL");
         }
 
+        private static bool IsSampleCheckpoint(string? samplingCheck)
+        {
+            var sample = (samplingCheck ?? string.Empty)
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", string.Empty);
+            return sample == "S" || sample.StartsWith("SAMPL");
+        }
+
+        // Sample / Visual not chosen yet (blank in the Excel).
+        private static bool IsProcedureUndecided(IhmCheckpoint checkpoint) =>
+            !IsVisualCheckpoint(checkpoint.VisualCheck) &&
+            !IsSampleCheckpoint(checkpoint.SamplingCheck);
+
         // When a checkpoint changes between Sample and Visual, switch only the
         // letter and keep the number the surveyor entered (S05 -> V05).
         private static string SwitchProcedurePrefix(string? sampleNo, bool toVisual)
@@ -3749,6 +3801,7 @@ namespace Survey_Certification_App.Controllers
             var prefix = toVisual ? "V" : "S";
             var value = (sampleNo ?? string.Empty).Trim();
             if (value.Length == 0 ||
+                value == "-" ||
                 value.Equals("S", StringComparison.OrdinalIgnoreCase) ||
                 value.Equals("V", StringComparison.OrdinalIgnoreCase))
                 return prefix;
