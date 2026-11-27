@@ -1007,6 +1007,59 @@ namespace Survey_Certification_App.Controllers
 
 
 
+        public class UpdateIhmCheckpointSampleNoRequest
+        {
+            public string SampleNo { get; set; } = string.Empty;
+            public bool AllowDuplicate { get; set; }
+            public int? UpdatedByUserId { get; set; }
+        }
+
+        // Saves only the sample / visual number (S01, V01, ...) typed by the
+        // surveyor on the web. Other checkpoint fields are not touched.
+        [HttpPut("checkpoints/{checkpointId:int}/sample-no")]
+        public async Task<IActionResult> UpdateCheckpointSampleNo(
+            int checkpointId,
+            [FromBody] UpdateIhmCheckpointSampleNoRequest request)
+        {
+            var checkpoint = await _db.IhmCheckpoints.FindAsync(checkpointId);
+            if (checkpoint == null)
+                return NotFound(new { message = "IHM checkpoint not found." });
+
+            var value = (request?.SampleNo ?? string.Empty).Trim().ToUpperInvariant();
+            if (!System.Text.RegularExpressions.Regex.IsMatch(value, "^[SV]\\d+$"))
+                return BadRequest(new { message = "Enter S or V followed by a number, e.g. S01 or V01." });
+
+            var isVisual = IsVisualCheckpoint(checkpoint.VisualCheck);
+            var isSample = !isVisual &&
+                string.Equals((checkpoint.SamplingCheck ?? string.Empty).Trim(), "S", StringComparison.OrdinalIgnoreCase);
+            if (isVisual && !value.StartsWith("V"))
+                return BadRequest(new { message = "This is a Visual checkpoint, so the number must start with V. Use \"Change to S\" first to make it Sample." });
+            if (isSample && !value.StartsWith("S"))
+                return BadRequest(new { message = "This is a Sample checkpoint, so the number must start with S. Use \"Change to V\" first to make it Visual." });
+
+            if (!request!.AllowDuplicate)
+            {
+                var usedBy = await _db.IhmCheckpoints
+                    .Where(x => x.SurveyJobId == checkpoint.SurveyJobId &&
+                                x.Id != checkpoint.Id &&
+                                x.Sample_No != null &&
+                                x.Sample_No.Trim().ToUpper() == value)
+                    .Select(x => x.Id)
+                    .FirstOrDefaultAsync();
+                if (usedBy > 0)
+                    return Conflict(new { message = $"{value} is already used by another checkpoint in this job.", duplicate = true });
+            }
+
+            checkpoint.Sample_No = value;
+            checkpoint.UpdatedByUserId = request.UpdatedByUserId ?? GetCurrentUserId();
+            checkpoint.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync();
+            await SyncCheckpointLabelsAsync(checkpoint.SurveyJobId);
+
+            return Ok(ToCheckpointDto(checkpoint));
+        }
+
         [HttpPut("checkpoints/{checkpointId:int}/procedure")]
         public async Task<IActionResult> UpdateCheckpointProcedure(
             int checkpointId,
